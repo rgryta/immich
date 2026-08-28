@@ -1,5 +1,6 @@
 {
   "about": "关于",
+  "accept": "接受",
   "account": "账户",
   "account_settings": "账户设置",
   "acknowledge": "好",
@@ -36,6 +37,7 @@
   "add_to_bottom_bar": "添加到",
   "add_upload_to_stack": "添加上传至堆叠",
   "add_url": "添加 URL",
+  "add_user": "添加用户",
   "added_to_archive": "添加至存档",
   "added_to_favorites": "已添加到收藏",
   "added_to_favorites_count": "已将 {count, number} 项添加到收藏",
@@ -292,6 +294,7 @@
     "notification_enable_email_notifications": "启用邮件通知",
     "notification_settings": "通知设置",
     "notification_settings_description": "管理通知设置，包括邮件通知",
+    "oauth_account_management_url": "账号管理链接",
     "oauth_allow_insecure_requests": "允许不安全的请求",
     "oauth_allow_insecure_requests_description": "警告：这将禁用OAuth请求的TLS证书验证，并可能使您面临MITM攻击。",
     "oauth_auto_launch": "自动启动",
@@ -1365,6 +1368,7 @@
   "manage_media_access_settings": "打开设置",
   "manage_media_access_subtitle": "允许 Immich 应用管理和移动媒体文件。",
   "manage_media_access_title": "媒体管理访问权限",
+  "manage_sharing_with_other_users": "管理与其他用户的共享",
   "manage_sharing_with_partners": "管理与协作者的共享设置",
   "manage_the_app_settings": "管理应用设置",
   "manage_your_account": "管理您的账户",
@@ -1394,6 +1398,7 @@
   "marked_all_as_read": "已全部标记为已读",
   "matches": "匹配项",
   "matching_assets": "匹配的项目",
+  "media": "媒体",
   "media_chrome": {
     "auto": "自动",
     "captions": "字幕",
