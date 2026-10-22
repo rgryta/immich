@@ -578,6 +578,7 @@ export const columns = {
     'asset_exif.exifImageWidth',
     'asset_exif.exposureTime',
     'asset_exif.fileSizeInByte',
+    'asset_exif.firmware',
     'asset_exif.fNumber',
     'asset_exif.focalLength',
     'asset_exif.fps',

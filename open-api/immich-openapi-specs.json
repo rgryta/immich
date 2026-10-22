@@ -22889,6 +22889,12 @@
             "nullable": true,
             "type": "integer"
           },
+          "firmware": {
+            "default": null,
+            "description": "Camera firmware version",
+            "nullable": true,
+            "type": "string"
+          },
           "focalLength": {
             "default": null,
             "description": "Focal length in mm",

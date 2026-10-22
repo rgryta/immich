@@ -1073,6 +1073,7 @@ describe(MetadataService.name, () => {
         zone: 'UTC-11:30',
         TagsList: ['parent/child'],
         Rating: 3,
+        Firmware: 'v1.11.10_build1',
       };
 
       mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
@@ -1094,6 +1095,7 @@ describe(MetadataService.name, () => {
             exposureTime: tags.ExposureTime,
             fNumber: null,
             fileSizeInByte: 123_456,
+            firmware: tags.Firmware,
             focalLength: tags.FocalLength,
             fps: null,
             iso: tags.ISO,

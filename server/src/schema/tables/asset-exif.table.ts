@@ -93,6 +93,9 @@ export class AssetExifTable {
   projectionType!: string | null;
 
   @Column({ type: 'character varying', nullable: true })
+  firmware!: string | null;
+
+  @Column({ type: 'character varying', nullable: true })
   profileDescription!: string | null;
 
   @Column({ type: 'character varying', nullable: true })

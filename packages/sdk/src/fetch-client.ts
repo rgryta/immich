@@ -1200,6 +1200,8 @@ export type ExifResponseDto = {
     fNumber?: number | null;
     /** File size in bytes */
     fileSizeInByte?: number | null;
+    /** Camera firmware version */
+    firmware?: string | null;
     /** Focal length in mm */
     focalLength?: number | null;
     /** ISO sensitivity */
