@@ -194,7 +194,7 @@ export class MetadataRepository {
    * never overwrite the base read.
    */
   private async readInsta360TrailerFields(path: string): Promise<ImmichTags> {
-    const tags = ['-Model', '-GPSLatitude', '-GPSLongitude', '-GPSAltitude'];
+    const tags = ['-Model', '-Firmware', '-GPSLatitude', '-GPSLongitude', '-GPSAltitude'];
     const args = ['-api', 'largefilesupport=1', '-ee', '-n', ...tags, '-json', path];
 
     try {

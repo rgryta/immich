@@ -1094,6 +1094,7 @@ describe(MetadataService.name, () => {
             exposureTime: tags.ExposureTime,
             fNumber: null,
             fileSizeInByte: 123_456,
+            firmware: null,
             focalLength: tags.FocalLength,
             fps: null,
             iso: tags.ISO,

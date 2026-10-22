@@ -30,6 +30,7 @@ export const ExifResponseSchema = z
     description: z.string().nullish().default(null).describe('Image description'),
     projectionType: z.string().nullish().default(null).describe('Projection type'),
     rating: z.int().min(1).max(5).nullish().default(null).describe('Rating'),
+    firmware: z.string().nullish().default(null).describe('Camera firmware version'),
   })
   .describe('EXIF response')
   .meta({ id: 'ExifResponseDto' });
@@ -60,5 +61,6 @@ export function mapExif(entity: MaybeDehydrated<Exif>): ExifResponseDto {
     description: entity.description,
     projectionType: entity.projectionType,
     rating: entity.rating,
+    firmware: entity.firmware,
   };
 }

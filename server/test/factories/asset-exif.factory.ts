@@ -26,6 +26,7 @@ export class AssetExifFactory {
       exifImageWidth: 42,
       exposureTime: null,
       fileSizeInByte: 69,
+      firmware: null,
       fNumber: 1.7,
       focalLength: 4.38,
       fps: null,

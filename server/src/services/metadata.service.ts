@@ -310,6 +310,7 @@ export class MetadataService extends BaseService {
       lensModel: getLensModel(exifTags),
       fNumber: validate(exifTags.FNumber),
       focalLength: validate(exifTags.FocalLength),
+      firmware: exifTags.Firmware || null,
 
       // comments
       description: String(exifTags.ImageDescription || exifTags.Description || '').trim(),
