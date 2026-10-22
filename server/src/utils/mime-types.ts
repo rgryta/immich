@@ -142,6 +142,12 @@ const sidecar: Record<string, string[]> = {
   '.xmp': ['application/xml', 'text/xml'],
 };
 
+/** Insta360 raw dual-fisheye formats: a JPEG (.insp) or MP4 (.insv) with a proprietary trailer appended. */
+const insta360: Record<string, string[]> = {
+  '.insp': webUnsupportedImage['.insp'],
+  '.insv': video['.insv'],
+};
+
 const types = { ...image, ...video, ...sidecar };
 
 const isType = (filename: string, r: Record<string, string[]>) =>
@@ -163,6 +169,7 @@ export const mimeTypes = {
   video,
   raw,
   webUnsupportedImage,
+  insta360,
 
   isAsset: (filename: string) => isType(filename, image) || isType(filename, video),
   isImage: (filename: string) => isType(filename, image),
@@ -172,6 +179,7 @@ export const mimeTypes = {
   isProfile: (filename: string) => isType(filename, profile),
   isSidecar: (filename: string) => isType(filename, sidecar),
   isVideo: (filename: string) => isType(filename, video),
+  isInsta360: (filename: string) => isType(filename, insta360),
   canBeTransparent: (filename: string) =>
     transparentCapableExtensions.has(getFilenameExtension(filename).toLowerCase()),
   isRaw: (filename: string) => isType(filename, raw),

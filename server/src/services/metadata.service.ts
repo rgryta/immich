@@ -279,7 +279,14 @@ export class MetadataService extends BaseService {
       exifImageHeight: validate(height),
       exifImageWidth: validate(width),
       orientation: validate(exifTags.Orientation)?.toString() ?? null,
-      projectionType: exifTags.ProjectionType ? exifTags.ProjectionType.toUpperCase() : null,
+      // Insta360's raw dual-fisheye files don't carry a standard XMP/GPano ProjectionType tag,
+      // but once their embedded stitched preview is used as the display image (see media.service),
+      // they should be treated as equirectangular like any other panorama.
+      projectionType: exifTags.ProjectionType
+        ? exifTags.ProjectionType.toUpperCase()
+        : mimeTypes.isInsta360(asset.originalFileName)
+          ? 'EQUIRECTANGULAR'
+          : null,
       bitsPerSample: this.getBitsPerSample(exifTags),
       colorspace: exifTags.ColorSpace === undefined ? null : String(exifTags.ColorSpace),
 
@@ -365,7 +372,10 @@ export class MetadataService extends BaseService {
 
     const isSidewards = exifTags.Orientation && this.isOrientationSidewards(exifTags.Orientation);
     const assetWidth = validate(isSidewards ? height : width);
-    const assetHeight = validate(isSidewards ? width : height);
+    // Insta360 files are shown stitched (2:1); a .insv only reports its square lens stream
+    const assetHeight = validate(
+      mimeTypes.isInsta360(asset.originalFileName) && width ? width / 2 : isSidewards ? width : height,
+    );
 
     const tasks = new Tasks();
 

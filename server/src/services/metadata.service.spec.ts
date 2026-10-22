@@ -1839,6 +1839,20 @@ describe(MetadataService.name, () => {
       );
     });
 
+    it('should give Insta360 videos the 2:1 size of their stitched form', async () => {
+      const asset = AssetFactory.create({ type: AssetType.Video, originalFileName: 'VID_1.insv' });
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      const stub = videoInfoStub.videoStreamVertical2160p;
+      mocks.media.probe.mockResolvedValue({
+        ...stub,
+        videoStreams: [{ ...stub.videoStreams[0], width: 3840, height: 3840, rotation: 0 }],
+      });
+      mockReadTags({});
+
+      await sut.handleMetadataExtraction({ id: asset.id });
+      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ width: 3840, height: 1920 }));
+    });
+
     it('should properly swap asset width/height for rotated images', async () => {
       const asset = AssetFactory.create();
       mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));

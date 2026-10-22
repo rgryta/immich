@@ -254,8 +254,13 @@ export class MediaService extends BaseService {
   }
 
   private async extractOriginalImage(asset: ThumbnailAsset, image: SystemConfig['image'], useEdits = false) {
-    const isExtractEmbedded = image.extractEmbedded && mimeTypes.isRaw(asset.originalFileName);
-    const extracted = isExtractEmbedded ? await this.extractImage(asset.originalPath, image.preview.size) : null;
+    const isInsta360 = mimeTypes.isInsta360(asset.originalFileName);
+    // The original's raw fisheye pixels are never a better source than the stitched image (or its
+    // embedded-preview fallback): always extract, and skip the minimum-size check RAW files have.
+    const isExtractEmbedded = isInsta360 || (image.extractEmbedded && mimeTypes.isRaw(asset.originalFileName));
+    const extracted = isExtractEmbedded
+      ? await this.extractImage(asset.originalPath, isInsta360 ? 0 : image.preview.size)
+      : null;
     const isGenerateFullsize =
       ((image.fullsize.enabled || asset.exifInfo.projectionType === 'EQUIRECTANGULAR') &&
         !mimeTypes.isWebSupportedImage(asset.originalPath)) ||
@@ -402,9 +407,10 @@ export class MediaService extends BaseService {
 
     const { x1, y1, x2, y2, oldWidth, oldHeight, exifOrientation, previewPath, originalPath } = data;
     let inputImage: string | Buffer;
-    if (data.type === AssetType.Video) {
+    // Insta360 originals are raw dual-fisheye; the stitched preview is what faces were found on.
+    if (data.type === AssetType.Video || mimeTypes.isInsta360(originalPath)) {
       if (!previewPath) {
-        this.logger.error(`Could not generate person thumbnail for video ${personGroupId}: missing preview path`);
+        this.logger.error(`Could not generate person thumbnail for ${personGroupId}: missing preview path`);
         return JobStatus.Failed;
       }
       inputImage = previewPath;
@@ -512,6 +518,14 @@ export class MediaService extends BaseService {
       throw new Error(`Missing video metadata for asset ${asset.id}`);
     }
 
+    if (mimeTypes.isInsta360(asset.originalPath)) {
+      try {
+        return await this.generateInsta360VideoThumbnails(asset, image, previewFile, thumbnailFile, videoStream);
+      } catch (error: any) {
+        this.logger.warn(`Could not use the Insta360 preview of ${asset.id}, using a video frame: ${error}`);
+      }
+    }
+
     const previewConfig = ThumbnailConfig.create({ ...ffmpeg, targetResolution: image.preview.size.toString() });
     const thumbConfig = ThumbnailConfig.create({ ...ffmpeg, targetResolution: image.thumbnail.size.toString() });
     const previewOptions = previewConfig.getCommand(TranscodeTarget.Video, videoStream, undefined, format ?? undefined);
@@ -529,6 +543,38 @@ export class MediaService extends BaseService {
       colorspace: image.colorspace,
       processInvalidImages,
     });
+
+    return {
+      files: [previewFile, thumbnailFile],
+      thumbhash,
+      fullsizeDimensions: { width: videoStream.width, height: videoStream.height },
+    };
+  }
+
+  /**
+   * Insta360's raw dual-fisheye videos have no stitched frame anywhere in the file itself -
+   * grabbing a still frame from the raw video track (as the normal ffmpeg-based path does)
+   * would just show one lens' fisheye circle. Their trailer does embed a small, already-
+   * stitched equirectangular preview image, which makes a far more useful poster/thumbnail
+   * even though it's just a static image, not a moving preview of the actual video.
+   */
+  private async generateInsta360VideoThumbnails(
+    asset: ThumbnailAsset,
+    image: SystemConfig['image'],
+    previewFile: UpsertFileOptions,
+    thumbnailFile: UpsertFileOptions,
+    videoStream: VideoStreamInfo,
+  ) {
+    const preview = await this.mediaRepository.extractInsta360Preview(asset.originalPath);
+    const baseOptions = { colorspace: image.colorspace, processInvalidImages: false };
+    const decoded = await this.mediaRepository.decodeImage(preview, baseOptions);
+
+    await Promise.all([
+      this.mediaRepository.generateThumbnail(decoded, { ...image.thumbnail, ...baseOptions }, thumbnailFile.path),
+      this.mediaRepository.generateThumbnail(decoded, { ...image.preview, ...baseOptions }, previewFile.path),
+    ]);
+
+    const thumbhash = await this.mediaRepository.generateThumbhash(decoded, baseOptions);
 
     return {
       files: [previewFile, thumbnailFile],
@@ -570,6 +616,31 @@ export class MediaService extends BaseService {
     if (!videoStream.height || !videoStream.width) {
       this.logger.warn(`Skipped transcoding for asset ${asset.id}: no video dimensions`);
       return JobStatus.Failed;
+    }
+
+    if (mimeTypes.isInsta360(asset.originalPath)) {
+      // The raw file holds two overlapping dual-fisheye streams, never directly
+      // playable, so the usual transcode-policy skip logic doesn't apply here.
+      try {
+        this.logger.log(`Stitching Insta360 video ${asset.id} to equirectangular`);
+        await this.mediaRepository.stitchInsta360Video(input, output);
+        await this.assetRepository.upsertFile({
+          assetId: asset.id,
+          type: AssetFileType.EncodedVideo,
+          path: output,
+          isEdited: false,
+        });
+        return JobStatus.Success;
+      } catch (error: any) {
+        // e.g. another Insta360 model: still give it a playable, if unstitched, video
+        this.logger.warn(`Could not stitch Insta360 video ${asset.id}, transcoding it unstitched: ${error.message}`);
+        // a single fisheye lens is not a panorama: show it flat, at its real size
+        await this.assetRepository.upsertExif({
+          exif: { assetId: asset.id, projectionType: null },
+          lockedPropertiesBehavior: 'skip',
+        });
+        await this.assetRepository.update({ id: asset.id, width: videoStream.width, height: videoStream.height });
+      }
     }
 
     let { ffmpeg } = await this.getConfig({ withCache: true });

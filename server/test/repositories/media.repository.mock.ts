@@ -20,6 +20,9 @@ export const newMediaRepositoryMock = (): Mocked<RepositoryInterface<MediaReposi
       keyframeOwnDuration: [],
     }),
     transcode: vitest.fn(),
+    stitchInsta360Video: vitest.fn().mockResolvedValue(undefined),
+    stitchInsta360Photo: vitest.fn().mockResolvedValue(Buffer.from('')),
+    extractInsta360Preview: vitest.fn().mockResolvedValue(Buffer.from('')),
     getImageMetadata: vitest.fn(),
   };
 };

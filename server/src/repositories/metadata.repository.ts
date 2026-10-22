@@ -1,8 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import { BinaryField, DefaultReadTaskOptions, ExifTool, ReadTaskOptions, Tags } from 'exiftool-vendored';
+import { BinaryField, DefaultReadTaskOptions, ExifTool, ReadTaskOptions, Tags, exiftoolPath } from 'exiftool-vendored';
 import geotz from 'geo-tz';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
+
+const execFileAsync = promisify(execFile);
 
 interface ExifDuration {
   Value: number;
@@ -84,9 +88,9 @@ export interface ImmichTags extends Omit<Tags, TagsWithWrongTypes> {
   SamsungModel?: string;
 }
 
-@Injectable()
-export class MetadataRepository {
-  private exiftool = new ExifTool({
+/** A factory so per-call reads can extend the default `readArgs` (a per-call `readArgs` replaces them). */
+function createExifToolOptions() {
+  return {
     defaultVideosToUTC: true,
     backfillTimezones: true,
     inferTimezoneFromDatestamps: true,
@@ -95,7 +99,7 @@ export class MetadataRepository {
     numericTags: [...DefaultReadTaskOptions.numericTags, 'FocalLength', 'FileSize', 'Rotation'],
     /* eslint unicorn/no-array-callback-reference: off, unicorn/no-array-method-this-argument: off */
     // eslint-disable-next-line import-x/no-named-as-default-member
-    geoTz: (lat, lon) => geotz.find(lat, lon)[0],
+    geoTz: (lat: number, lon: number) => geotz.find(lat, lon)[0],
     geolocation: true,
     readArgs: [
       // Enable exiftool LFS to parse metadata for files larger than 2GB.
@@ -112,7 +116,12 @@ export class MetadataRepository {
     ],
     writeArgs: ['-api', 'largefilesupport=1', '-overwrite_original'],
     taskTimeoutMillis: 2 * 60 * 1000,
-  });
+  };
+}
+
+@Injectable()
+export class MetadataRepository {
+  private exiftool = new ExifTool(createExifToolOptions());
 
   constructor(private logger: LoggingRepository) {
     this.logger.setContext(MetadataRepository.name);
@@ -126,13 +135,77 @@ export class MetadataRepository {
     await this.exiftool.end();
   }
 
-  readTags(path: string): Promise<ImmichTags> {
+  async readTags(path: string): Promise<ImmichTags> {
+    if (mimeTypes.isInsta360(path)) {
+      return this.readInsta360Tags(path);
+    }
+
     const options: ReadTaskOptions | undefined = mimeTypes.isVideo(path) ? { readArgs: ['-ee'] } : undefined;
 
     return this.exiftool.read(path, options).catch((error) => {
       this.logger.warn(`Error reading exif data (${path}): ${error}\n${error?.stack}`);
       return {};
     }) as Promise<ImmichTags>;
+  }
+
+  /**
+   * Insta360's raw dual-fisheye files (.insp/.insv) embed camera info (model, firmware,
+   * serial number, stitching calibration) in a proprietary trailer, which requires `-ee`
+   * to read. For photos the trailer is small and reads fine through the normal shared
+   * exiftool process. For videos, the trailer holds per-frame IMU telemetry for the
+   * entire recording, and reading it with `-ee` through the long-lived, persistent
+   * (`-stay_open`) exiftool process has been observed to intermittently take 60+ seconds
+   * and blow past `taskTimeoutMillis` on multi-GB videos - especially under concurrent
+   * load - even though a plain, non-persistent `exiftool ... file.insv` invocation handles
+   * the exact same file in a few seconds, every time. The slowdown is specific to the
+   * persistent-process protocol itself (reproduced even with a freshly-spawned, unshared
+   * persistent process), not to which tags are requested, so the fix is to genuinely not
+   * use `-stay_open` for this one read - not something exiftool-vendored's `ExifTool`
+   * class supports directly, since it always runs in persistent mode.
+   */
+  private async readInsta360Tags(path: string): Promise<ImmichTags> {
+    if (!mimeTypes.isVideo(path)) {
+      // .insp: the trailer is small (a single frame's worth of context), so this is fast
+      // even through the shared persistent process.
+      return this.exiftool.read(path, { readArgs: [...createExifToolOptions().readArgs, '-ee'] }).catch((error) => {
+        this.logger.warn(`Error reading exif data (${path}): ${error}\n${(error as Error)?.stack}`);
+        return {};
+      }) as Promise<ImmichTags>;
+    }
+
+    // .insv: standard video metadata (dimensions, dates, ...) reads fine through the shared
+    // process without `-ee` - it's specifically the dense per-frame telemetry trailer that's
+    // slow. Read the two separately and merge, so a slow/failed trailer read never blocks
+    // (or is blocked by) the asset's regular metadata.
+    const [baseTags, insta360Fields] = await Promise.all([
+      this.exiftool.read(path).catch((error) => {
+        this.logger.warn(`Error reading exif data (${path}): ${error}\n${(error as Error)?.stack}`);
+        return {};
+      }),
+      this.readInsta360TrailerFields(path),
+    ]);
+
+    return { ...baseTags, ...insta360Fields } as ImmichTags;
+  }
+
+  /**
+   * Reads the trailer-only tags a normal video gets from `-ee` (camera info, GPS) via a genuine
+   * one-shot (non-`-stay_open`) exiftool process. Tags the file lacks are simply absent, so they
+   * never overwrite the base read.
+   */
+  private async readInsta360TrailerFields(path: string): Promise<ImmichTags> {
+    const tags = ['-Model', '-GPSLatitude', '-GPSLongitude', '-GPSAltitude'];
+    const args = ['-api', 'largefilesupport=1', '-ee', '-n', ...tags, '-json', path];
+
+    try {
+      const bin = await exiftoolPath();
+      const { stdout } = await execFileAsync(bin, args, { maxBuffer: 10 * 1024 * 1024, timeout: 2 * 60 * 1000 });
+      const [{ SourceFile: _, ...found }] = JSON.parse(stdout) as [ImmichTags];
+      return found;
+    } catch (error) {
+      this.logger.warn(`Error reading Insta360 trailer fields (${path}): ${error}\n${(error as Error)?.stack}`);
+      return {};
+    }
   }
 
   extractBinaryTag(path: string, tagName: string): Promise<Buffer> {

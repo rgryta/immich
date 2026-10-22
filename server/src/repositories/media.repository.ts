@@ -3,9 +3,12 @@ import { ExifDateTime, WriteTags, exiftool } from 'exiftool-vendored';
 import ffmpeg, { FfprobeData, FfprobeStream } from 'fluent-ffmpeg';
 import { camelCase, upperFirst } from 'lodash-es';
 import { Duration } from 'luxon';
-import { spawn } from 'node:child_process';
+import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { Writable } from 'node:stream';
+import { promisify } from 'node:util';
 import sharp, { Sharp } from 'sharp';
 import type {
   Bitmap,
@@ -37,6 +40,17 @@ import {
   RawExtractedFormat,
 } from 'src/enum.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
+import {
+  INSTA360_TAIL_LENGTH,
+  blendWeight,
+  forEachInsta360Row,
+  insta360Lenses,
+  insta360Orientation,
+  insta360PreviewRgb,
+  insta360TrailerLength,
+  parseInsta360Trailer,
+} from 'src/utils/insta360.js';
+import { mimeTypes } from 'src/utils/mime-types.js';
 import { handlePromiseError } from 'src/utils/misc.js';
 import { createAffineMatrix } from 'src/utils/transform.js';
 
@@ -45,6 +59,8 @@ const probe = (input: string, options: string[]): Promise<FfprobeData> =>
     // eslint-disable-next-line import-x/no-named-as-default-member
     ffmpeg.ffprobe(input, options, (error, data) => (error ? reject(error) : resolve(data))),
   );
+
+const execFileAsync = promisify(execFile);
 
 const pascalCase = (str: string) => upperFirst(camelCase(str.toLowerCase()));
 
@@ -92,6 +108,26 @@ export class MediaRepository {
         this.logger.debug(`Could not extract ${tag} buffer from image: ${error}`);
       }
     }
+
+    if (mimeTypes.isInsta360(input)) {
+      // Insta360's raw dual-fisheye photos have both fisheye circles in one JPEG -
+      // stitch them into a full-resolution equirectangular photo (see stitchInsta360Photo).
+      try {
+        const buffer = await this.stitchInsta360Photo(input);
+        this.logger.debug(`Successfully stitched Insta360 photo`);
+        return { buffer, format: RawExtractedFormat.Jpeg };
+      } catch (error: any) {
+        this.logger.warn(`Could not stitch Insta360 photo ${input}, falling back to its embedded preview: ${error}`);
+      }
+
+      // the camera's own small stitched preview from the trailer
+      try {
+        return { buffer: await this.extractInsta360Preview(input), format: RawExtractedFormat.Jpeg };
+      } catch (error: any) {
+        this.logger.warn(`Could not read the Insta360 preview of ${input}: ${error}`);
+      }
+    }
+
     return null;
   }
 
@@ -430,6 +466,195 @@ export class MediaRepository {
         })
         .run();
     });
+  }
+
+  /**
+   * Stitches an Insta360 X5 raw dual-fisheye video (one HEVC stream per lens) into a single
+   * equirectangular MP4 with Immich's own ffmpeg: each lens is remapped through lookup maps
+   * computed once from the file's calibration (see utils/insta360.ts), then blended by mask.
+   */
+  async stitchInsta360Video(input: string, output: string): Promise<void> {
+    const trailer = await this.readInsta360Trailer(input);
+    const { streams } = await probe(input, []);
+    const stream = streams.find((stream) => stream.codec_type === 'video');
+    if (!stream?.width) {
+      throw new Error('no video stream');
+    }
+    const width = stream.width;
+    const lensHeight = stream.height ?? width;
+    const height = width / 2;
+    // shortcut: levelled once, at the first frame; per-frame levelling needs per-frame maps (a custom filter)
+    const lensData = insta360Lenses(trailer, width, insta360Orientation(trailer));
+
+    // remap is nearest-neighbour; coordinates outside the lens crop become black (65535 = unmapped)
+    const xmaps = [new Uint16Array(width * height), new Uint16Array(width * height)];
+    const ymaps = [new Uint16Array(width * height), new Uint16Array(width * height)];
+    const mask = new Uint8Array(width * height);
+    await forEachInsta360Row(width, height, lensData, (y, u0, v0, u1, v1, w0) => {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        const valid = [0, 1].map((l) => {
+          const u = Math.round(l ? u1[x] : u0[x]);
+          const v = Math.round(l ? v1[x] : v0[x]);
+          const ok = u >= 0 && u < width && v >= 0 && v < lensHeight;
+          xmaps[l][i] = ok ? u : 65_535;
+          ymaps[l][i] = ok ? v : 65_535;
+          return ok;
+        });
+        mask[i] = Math.round(255 * blendWeight(valid[0], valid[1], w0[x]));
+      }
+    });
+
+    const folder = await fs.mkdtemp(join(tmpdir(), 'insta360-'));
+    try {
+      const planes = { x0: xmaps[0], y0: ymaps[0], x1: xmaps[1], y1: ymaps[1], mask };
+      for (const [name, plane] of Object.entries(planes)) {
+        await fs.writeFile(join(folder, name), plane);
+      }
+      const rawInput = (name: string, format: string) => [
+        '-f',
+        'rawvideo',
+        '-pix_fmt',
+        format,
+        '-s',
+        `${width}x${height}`,
+        '-i',
+        join(folder, name),
+      ];
+      await execFileAsync(
+        'ffmpeg',
+        [
+          '-v',
+          'error',
+          '-y',
+          '-i',
+          input,
+          ...rawInput('x0', 'gray16le'),
+          ...rawInput('y0', 'gray16le'),
+          ...rawInput('x1', 'gray16le'),
+          ...rawInput('y1', 'gray16le'),
+          ...rawInput('mask', 'gray'),
+          '-filter_complex',
+          // .insv stores calibration lens 1 as the first video stream
+          '[0:v:1]format=gbrp[l0];[0:v:0]format=gbrp[l1];[5]format=gbrp[m];' +
+            '[l0][1][2]remap[f];[l1][3][4]remap[b];[b][f][m]maskedmerge,format=yuv420p[out]',
+          '-map',
+          '[out]',
+          '-map',
+          '0:a?',
+          '-c:v',
+          'libx264',
+          '-preset',
+          'medium',
+          '-crf',
+          '20',
+          '-c:a',
+          'copy',
+          '-movflags',
+          '+faststart',
+          output,
+        ],
+        { maxBuffer: 10 * 1024 * 1024 },
+      );
+    } finally {
+      await fs.rm(folder, { recursive: true, force: true });
+    }
+  }
+
+  /**
+   * Stitches an Insta360 X5 raw dual-fisheye photo (one JPEG holding both fisheye circles)
+   * into a color equirectangular JPEG, the way Insta360 Studio does. Everything needed -
+   * lens calibration and the IMU stream Studio levels the photo with - comes from the
+   * .insp file's own trailer; see utils/insta360.ts.
+   */
+  stitchInsta360Photo(input: string): Promise<Buffer> {
+    // the stitch is single-threaded JS holding ~1 GB: queueing loses no speed and caps the memory
+    const result = this.insta360PhotoStitches.then(() => this.stitchInsta360PhotoNow(input));
+    this.insta360PhotoStitches = result.catch(() => {});
+    return result;
+  }
+
+  private insta360PhotoStitches: Promise<unknown> = Promise.resolve();
+
+  private async stitchInsta360PhotoNow(input: string): Promise<Buffer> {
+    const trailer = await this.readInsta360Trailer(input);
+    const { data, info } = await sharp(input).raw().toBuffer({ resolveWithObject: true });
+    const { width, height, channels } = info;
+    if (width !== 2 * height) {
+      throw new Error(`unexpected .insp layout ${width}x${height}`);
+    }
+    const lensData = insta360Lenses(trailer, height, insta360Orientation(trailer));
+    const out = Buffer.alloc(data.length);
+    const a = new Float64Array(channels);
+    const b = new Float64Array(channels);
+    // neighbours outside a lens crop count as black
+    const tap = (lens: number, x: number, y: number, weight: number, into: Float64Array) => {
+      if (x < 0 || x >= height || y < 0 || y >= height) {
+        return;
+      }
+      const i = (y * width + x + lens * height) * channels;
+      for (let c = 0; c < channels; c++) {
+        into[c] += data[i + c] * weight;
+      }
+    };
+    // bilinear like Studio's single texture fetch
+    const sample = (lens: number, u: number, v: number, into: Float64Array) => {
+      into.fill(0);
+      if (Number.isNaN(u)) {
+        return false;
+      }
+      const x0 = Math.floor(u);
+      const y0 = Math.floor(v);
+      const fx = u - x0;
+      const fy = v - y0;
+      tap(lens, x0, y0, (1 - fx) * (1 - fy), into);
+      tap(lens, x0 + 1, y0, fx * (1 - fy), into);
+      tap(lens, x0, y0 + 1, (1 - fx) * fy, into);
+      tap(lens, x0 + 1, y0 + 1, fx * fy, into);
+      return true;
+    };
+    await forEachInsta360Row(width, height, lensData, (y, u0, v0, u1, v1, w0) => {
+      for (let x = 0; x < width; x++) {
+        const weight = blendWeight(sample(0, u0[x], v0[x], a), sample(1, u1[x], v1[x], b), w0[x]);
+        const o = (y * width + x) * channels;
+        for (let c = 0; c < channels; c++) {
+          out[o + c] = a[c] * weight + b[c] * (1 - weight) + 0.5;
+        }
+      }
+    });
+    // quality=100 matches Insta360 Studio's own JPEG output (the flat all-1s IJG table)
+    return sharp(out, { raw: { width, height, channels } }).jpeg({ quality: 100 }).toBuffer();
+  }
+
+  /** The camera's own small stitched equirectangular frame from the trailer, as JPEG. */
+  async extractInsta360Preview(input: string): Promise<Buffer> {
+    const { preview } = await this.readInsta360Trailer(input);
+    if (!preview) {
+      throw new Error('no preview in trailer');
+    }
+    const { width, height } = preview;
+    return sharp(insta360PreviewRgb(preview), { raw: { width, height, channels: 3 } })
+      .jpeg()
+      .toBuffer();
+  }
+
+  /** Reads only the trailer at the end of the file (videos are several GB). */
+  private async readInsta360Trailer(input: string) {
+    const file = await fs.open(input, 'r');
+    try {
+      const { size } = await file.stat();
+      const { buffer: tail } = await file.read(
+        Buffer.alloc(INSTA360_TAIL_LENGTH),
+        0,
+        INSTA360_TAIL_LENGTH,
+        Math.max(size - INSTA360_TAIL_LENGTH, 0),
+      );
+      const length = insta360TrailerLength(tail, size);
+      const { buffer } = await file.read(Buffer.alloc(length), 0, length, size - length);
+      return parseInsta360Trailer(buffer);
+    } finally {
+      await file.close();
+    }
   }
 
   async getImageMetadata(input: string | Buffer): Promise<ImageDimensions & { isTransparent: boolean }> {

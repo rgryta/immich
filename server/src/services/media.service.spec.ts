@@ -551,6 +551,36 @@ describe(MediaService.name, () => {
       ]);
     });
 
+    it('should use the Insta360 preview as a video poster', async () => {
+      const asset = AssetFactory.from({ type: AssetType.Video, originalPath: '/original/VID_1.insv' }).exif().build();
+      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue({
+        ...getForGenerateThumbnail(asset),
+        ...probeStub.videoStream2160p,
+      });
+
+      await sut.handleGenerateThumbnails({ id: asset.id });
+
+      expect(mocks.media.extractInsta360Preview).toHaveBeenCalledWith('/original/VID_1.insv');
+      expect(mocks.media.transcode).not.toHaveBeenCalled();
+    });
+
+    it('should fall back to a video frame when the Insta360 preview is unusable', async () => {
+      const asset = AssetFactory.from({ type: AssetType.Video, originalPath: '/original/VID_1.insv' }).exif().build();
+      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue({
+        ...getForGenerateThumbnail(asset),
+        ...probeStub.videoStream2160p,
+      });
+      mocks.media.extractInsta360Preview.mockRejectedValue(new Error('no preview in trailer'));
+
+      await sut.handleGenerateThumbnails({ id: asset.id });
+
+      expect(mocks.media.transcode).toHaveBeenCalledWith(
+        '/original/VID_1.insv',
+        expect.any(String),
+        expect.any(Object),
+      );
+    });
+
     it('should tonemap thumbnail for hdr video', async () => {
       const asset = AssetFactory.from({ type: AssetType.Video, originalPath: '/original/path.ext' }).exif().build();
       mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue({
@@ -928,6 +958,21 @@ describe(MediaService.name, () => {
         processInvalidImages: false,
         size: 1440,
       });
+    });
+
+    it('should stitch Insta360 photos even with embedded extraction disabled', async () => {
+      const asset = AssetFactory.from({ originalFileName: 'IMG_1.insp', originalPath: '/original/IMG_1.insp' })
+        .exif()
+        .build();
+      mocks.media.extract.mockResolvedValue({ buffer: extractedBuffer, format: RawExtractedFormat.Jpeg });
+      mocks.media.getImageMetadata.mockResolvedValue({ width: 10_752, height: 5376, isTransparent: false });
+      mocks.systemMetadata.get.mockResolvedValue({ image: { extractEmbedded: false } });
+      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
+
+      await sut.handleGenerateThumbnails({ id: asset.id });
+
+      expect(mocks.media.extract).toHaveBeenCalledWith('/original/IMG_1.insp');
+      expect(mocks.media.decodeImage).toHaveBeenCalledWith(extractedBuffer, expect.anything());
     });
 
     it('should not check transparency metadata for raw files without extracted images', async () => {
@@ -1518,6 +1563,21 @@ describe(MediaService.name, () => {
       expect(mocks.media.generateThumbnail).toHaveBeenCalled();
     });
 
+    it('should crop Insta360 faces from the stitched preview, not re-stitch the original', async () => {
+      const data = { ...personThumbnailStub.newThumbnailMiddle, originalPath: '/original/path.insp' };
+      mocks.person.getDataForThumbnailGenerationJob.mockResolvedValue(data);
+      mocks.media.decodeImage.mockResolvedValue({
+        data: Buffer.from(''),
+        info: { width: 1000, height: 1000 } as OutputInfo,
+      });
+
+      await expect(
+        sut.handleGeneratePersonThumbnail({ ownerId: 'owner-1', personGroupId: 'person-group-1' }),
+      ).resolves.toBe(JobStatus.Success);
+      expect(mocks.media.extract).not.toHaveBeenCalled();
+      expect(mocks.media.decodeImage).toHaveBeenCalledWith(data.previewPath, expect.anything());
+    });
+
     it('should skip a person not found', async () => {
       await sut.handleGeneratePersonThumbnail({ ownerId: 'owner-1', personGroupId: 'person-group-1' });
       expect(mocks.media.generateThumbnail).not.toHaveBeenCalled();
@@ -2016,6 +2076,39 @@ describe(MediaService.name, () => {
           outputOptions: expect.arrayContaining(['-map', '0:1', '-map', '0:3']),
           twoPass: false,
         }),
+      );
+    });
+
+    it('should stitch Insta360 videos', async () => {
+      mocks.assetJob.getForVideoConversion.mockResolvedValue({ ...asset, originalPath: '/original/VID_1.insv' });
+
+      await expect(sut.handleVideoConversion({ id: 'video-id' })).resolves.toBe(JobStatus.Success);
+
+      expect(mocks.media.stitchInsta360Video).toHaveBeenCalledWith('/original/VID_1.insv', expect.any(String));
+      expect(mocks.media.transcode).not.toHaveBeenCalled();
+    });
+
+    it('should transcode an Insta360 video unstitched when it cannot be stitched', async () => {
+      mocks.logger.isLevelEnabled.mockReturnValue(false);
+      mocks.assetJob.getForVideoConversion.mockResolvedValue({
+        ...asset,
+        ...probeStub.multipleVideoStreams,
+        originalPath: '/original/VID_1.insv',
+      });
+      mocks.media.stitchInsta360Video.mockRejectedValue(new Error('unsupported lens type 87'));
+
+      await sut.handleVideoConversion({ id: 'video-id' });
+
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({ exif: { assetId: asset.id, projectionType: null } }),
+      );
+      const { width, height } = probeStub.multipleVideoStreams.videoStream!;
+      expect(mocks.asset.update).toHaveBeenCalledWith({ id: asset.id, width, height });
+
+      expect(mocks.media.transcode).toHaveBeenCalledWith(
+        '/original/VID_1.insv',
+        expect.any(String),
+        expect.any(Object),
       );
     });
 

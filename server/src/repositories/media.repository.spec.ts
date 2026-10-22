@@ -320,6 +320,28 @@ describe(MediaRepository.name, () => {
     });
   });
 
+  describe('stitchInsta360Photo', () => {
+    it('should stitch one photo at a time, even after a failure', async () => {
+      const order: string[] = [];
+      const stitcher = sut as unknown as { stitchInsta360PhotoNow: (input: string) => Promise<Buffer> };
+      vi.spyOn(stitcher, 'stitchInsta360PhotoNow').mockImplementation(async (input) => {
+        order.push(`start ${input}`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        order.push(`end ${input}`);
+        if (input === 'a') {
+          throw new Error('unsupported');
+        }
+        return Buffer.from(input);
+      });
+
+      const [a, b] = await Promise.allSettled([sut.stitchInsta360Photo('a'), sut.stitchInsta360Photo('b')]);
+
+      expect(a.status).toBe('rejected');
+      expect(b).toEqual({ status: 'fulfilled', value: Buffer.from('b') });
+      expect(order).toEqual(['start a', 'end a', 'start b', 'end b']);
+    });
+  });
+
   describe('generateThumbnail', () => {
     it('should process random Authentik thumbnail image', async () => {
       const response = await fetch(
