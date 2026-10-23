@@ -554,6 +554,9 @@ describe(MediaService.name, () => {
 
     it('should use the Insta360 preview as a video poster', async () => {
       const asset = AssetFactory.from({ type: AssetType.Video, originalPath: '/original/VID_1.insv' }).exif().build();
+      mocks.systemMetadata.get.mockResolvedValue({
+        image: { preview: { progressive: true }, thumbnail: { progressive: true } },
+      });
       mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue({
         ...getForGenerateThumbnail(asset),
         ...probeStub.videoStream2160p,
@@ -563,11 +566,11 @@ describe(MediaService.name, () => {
 
       expect(mocks.media.extractInsta360Preview).toHaveBeenCalledWith('/original/VID_1.insv');
       expect(mocks.media.transcode).not.toHaveBeenCalled();
-      expect(mocks.media.generateThumbnail).toHaveBeenCalledWith(
-        expect.anything(),
-        expect.objectContaining({ progressive: false }),
-        expect.any(String),
-      );
+      // the file rows say isProgressive: false, so neither image may be written progressive
+      expect(mocks.media.generateThumbnail).toHaveBeenCalledTimes(2);
+      for (const [, options] of mocks.media.generateThumbnail.mock.calls) {
+        expect(options).toMatchObject({ progressive: false });
+      }
     });
 
     it('should fall back to a video frame when the Insta360 preview is unusable', async () => {
@@ -2113,14 +2116,17 @@ describe(MediaService.name, () => {
       expect(mocks.asset.update).toHaveBeenCalledWith({ id: asset.id, width, height: width / 2 });
     });
 
-    it('should fail, not flatten, an Insta360 video whose stitch hit an I/O error', async () => {
+    it('should fail an Insta360 video whose stitch hit an I/O error so it can be retried', async () => {
       mocks.assetJob.getForVideoConversion.mockResolvedValue({ ...asset, originalPath: '/original/VID_1.insv' });
       mocks.media.stitchInsta360Video.mockRejectedValue(new Error('ENOSPC: no space left on device'));
 
       await expect(sut.handleVideoConversion({ id: 'video-id' })).rejects.toThrow('ENOSPC');
 
       expect(mocks.media.transcode).not.toHaveBeenCalled();
-      expect(mocks.asset.upsertExif).not.toHaveBeenCalled();
+      // the raw original plays meanwhile, so it must not be shown as a panorama
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({ exif: { assetId: asset.id, projectionType: null } }),
+      );
     });
 
     it('should transcode an Insta360 video unstitched when it cannot be stitched', async () => {

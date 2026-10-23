@@ -143,7 +143,8 @@ export const parseInsta360Trailer = (trailer: Buffer): Insta360Trailer => {
 
   const imu = records.get(RECORD_IMU);
   if (imu && imu.length >= 20) {
-    const limit = (result.firstFrameUs ?? Number(imu.readBigUInt64LE(0))) + IMU_WINDOW_US;
+    const start = Number(imu.readBigUInt64LE(0));
+    const limit = Math.max(result.firstFrameUs ?? start, start) + IMU_WINDOW_US;
     let count = 0;
     while (count < Math.floor(imu.length / 20) && Number(imu.readBigUInt64LE(count * 20)) <= limit) {
       count++;

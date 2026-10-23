@@ -63,6 +63,12 @@ const probe = (input: string, options: string[]): Promise<FfprobeData> =>
 
 const execFileAsync = promisify(execFile);
 
+const assertInsta360PhotoLayout = (width: number, height: number) => {
+  if (width !== 2 * height) {
+    throw new Insta360UnsupportedError(`unexpected .insp layout ${width}x${height}`);
+  }
+};
+
 const pascalCase = (str: string) => upperFirst(camelCase(str.toLowerCase()));
 
 type ProgressEvent = {
@@ -476,12 +482,8 @@ export class MediaRepository {
    */
   async stitchInsta360Video(input: string, output: string): Promise<void> {
     const trailer = await this.readInsta360Trailer(input);
-    const { streams } = await probe(input, []);
-    const [stream, ...others] = streams.filter((stream) => stream.codec_type === 'video');
-    if (!stream?.width || others.length === 0) {
-      throw new Insta360UnsupportedError('expected one video stream per lens');
-    }
-    const width = stream.width;
+    const stream = await this.insta360LensStream(input);
+    const width = stream.width!;
     const lensHeight = stream.height ?? width;
     const height = width / 2;
     // shortcut: levelled once, at the first frame; per-frame levelling needs per-frame maps (a custom filter)
@@ -581,9 +583,7 @@ export class MediaRepository {
     const trailer = await this.readInsta360Trailer(input);
     const { data, info } = await sharp(input).raw().toBuffer({ resolveWithObject: true });
     const { width, height, channels } = info;
-    if (width !== 2 * height) {
-      throw new Insta360UnsupportedError(`unexpected .insp layout ${width}x${height}`);
-    }
+    assertInsta360PhotoLayout(width, height);
     const lensData = insta360Lenses(trailer, height, insta360Orientation(trailer));
     const out = Buffer.alloc(data.length);
     const a = new Float64Array(channels);
@@ -646,6 +646,13 @@ export class MediaRepository {
       const trailer = await this.readInsta360Trailer(input);
       preview = !!trailer.preview;
       insta360Lenses(trailer, 1, insta360Orientation(trailer));
+      // the stitchers' own checks on the media itself, so the probe can never disagree with them
+      if (mimeTypes.isVideo(input)) {
+        await this.insta360LensStream(input);
+      } else {
+        const { width = 0, height = 0 } = await sharp(input).metadata();
+        assertInsta360PhotoLayout(width, height);
+      }
       return { stitchable: true, preview };
     } catch (error) {
       if (error instanceof Insta360UnsupportedError) {
@@ -653,6 +660,16 @@ export class MediaRepository {
       }
       throw error;
     }
+  }
+
+  /** The first of the two lens streams a stitchable .insv carries. */
+  private async insta360LensStream(input: string) {
+    const { streams } = await probe(input, []);
+    const [stream, ...others] = streams.filter((stream) => stream.codec_type === 'video');
+    if (!stream?.width || others.length === 0) {
+      throw new Insta360UnsupportedError('expected one video stream per lens');
+    }
+    return stream;
   }
 
   /** Reads only the trailer at the end of the file (videos are several GB). */
@@ -667,7 +684,11 @@ export class MediaRepository {
         Math.max(size - INSTA360_TAIL_LENGTH, 0),
       );
       const length = insta360TrailerLength(tail, size);
-      const { buffer } = await file.read(Buffer.alloc(length), 0, length, size - length);
+      const { buffer, bytesRead } = await file.read(Buffer.alloc(length), 0, length, size - length);
+      // a short read would parse as "no records" and look unsupported; it is an I/O error worth a retry
+      if (bytesRead !== length) {
+        throw new Error(`short read of the Insta360 trailer (${bytesRead} of ${length} bytes)`);
+      }
       return parseInsta360Trailer(buffer);
     } finally {
       await file.close();

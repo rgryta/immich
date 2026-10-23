@@ -1,4 +1,4 @@
-import { mkdtempDisposableSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
+import { mkdtempDisposableSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
@@ -61,17 +61,23 @@ const buildTestQuadImage = async () => {
   return image.png().toBuffer();
 };
 
-const insta360File = (contents: Buffer) => {
-  const path = join(mkdtempSync(join(tmpdir(), 'insta360-')), 'IMG_1.insp');
+const insta360Folder = mkdtempDisposableSync(join(tmpdir(), 'insta360-'));
+afterAll(() => insta360Folder.remove());
+
+const insta360File = (name: string, contents: Buffer) => {
+  const path = join(insta360Folder.path, name);
   writeFileSync(path, contents);
   return path;
 };
 
-/** A minimal X5 photo: a JPEG stand-in, then a trailer with IMU, calibration and lens guard state. */
-const x5File = (offsetState: number) =>
+/** A minimal X5 photo: a `width` x `height` JPEG, then a trailer with IMU, calibration and lens guard state. */
+const x5File = async (name: string, offsetState: number, width = 4, height = 2) =>
   insta360File(
+    name,
     Buffer.concat([
-      Buffer.from('jpeg'),
+      await sharp({ create: { width, height, channels: 3, background: 'black' } })
+        .jpeg()
+        .toBuffer(),
       insta360FileTail(
         record(0x3_00, imuSamples(2, 1000)),
         record(0x1_01, Buffer.concat([field(5, Buffer.from(INSTA360_OFFSET)), field(68, offsetState)])),
@@ -341,9 +347,20 @@ describe(MediaRepository.name, () => {
 
   describe('probeInsta360', () => {
     it('should tell a stitchable file from one it cannot stitch', async () => {
-      await expect(sut.probeInsta360(x5File(0))).resolves.toEqual({ stitchable: true, preview: false });
-      await expect(sut.probeInsta360(x5File(4))).resolves.toEqual({ stitchable: false, preview: false });
-      await expect(sut.probeInsta360(insta360File(Buffer.from('a jpeg with no trailer')))).resolves.toEqual({
+      await expect(sut.probeInsta360(await x5File('IMG_bare.insp', 0))).resolves.toEqual({
+        stitchable: true,
+        preview: false,
+      });
+      await expect(sut.probeInsta360(await x5File('IMG_guard.insp', 4))).resolves.toEqual({
+        stitchable: false,
+        preview: false,
+      });
+      // the stitch refuses a photo that isn't two side-by-side lenses, so the probe must too
+      await expect(sut.probeInsta360(await x5File('IMG_square.insp', 0, 3, 3))).resolves.toEqual({
+        stitchable: false,
+        preview: false,
+      });
+      await expect(sut.probeInsta360(insta360File('IMG_none.insp', Buffer.from('no trailer')))).resolves.toEqual({
         stitchable: false,
         preview: false,
       });
