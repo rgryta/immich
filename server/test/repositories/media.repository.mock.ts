@@ -23,6 +23,7 @@ export const newMediaRepositoryMock = (): Mocked<RepositoryInterface<MediaReposi
     stitchInsta360Video: vitest.fn().mockResolvedValue(undefined),
     stitchInsta360Photo: vitest.fn().mockResolvedValue(Buffer.from('')),
     extractInsta360Preview: vitest.fn().mockResolvedValue(Buffer.from('')),
+    probeInsta360: vitest.fn().mockResolvedValue({ stitchable: true, preview: true }),
     getImageMetadata: vitest.fn(),
   };
 };

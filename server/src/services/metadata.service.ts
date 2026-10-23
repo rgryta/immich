@@ -236,9 +236,10 @@ export class MetadataService extends BaseService {
       return;
     }
 
-    const [exifResult, stats] = await Promise.all([
+    const [exifResult, stats, insta360] = await Promise.all([
       this.getExifTags(asset),
       this.storageRepository.stat(asset.originalPath),
+      mimeTypes.isInsta360(asset.originalFileName) ? this.probeInsta360(asset.originalPath) : undefined,
     ]);
     const { tags: exifTags, audio, video, packets, format } = exifResult;
     this.logger.verbose('Exif Tags', exifTags);
@@ -279,12 +280,11 @@ export class MetadataService extends BaseService {
       exifImageHeight: validate(height),
       exifImageWidth: validate(width),
       orientation: validate(exifTags.Orientation)?.toString() ?? null,
-      // Insta360's raw dual-fisheye files don't carry a standard XMP/GPano ProjectionType tag,
-      // but once their embedded stitched preview is used as the display image (see media.service),
-      // they should be treated as equirectangular like any other panorama.
+      // Insta360 raw dual-fisheye files have no GPano tag; they are shown stitched, or (photos) as the
+      // camera's own equirectangular preview when they can't be
       projectionType: exifTags.ProjectionType
         ? exifTags.ProjectionType.toUpperCase()
-        : mimeTypes.isInsta360(asset.originalFileName)
+        : insta360 && (insta360.stitchable || (asset.type === AssetType.Image && insta360.preview))
           ? 'EQUIRECTANGULAR'
           : null,
       bitsPerSample: this.getBitsPerSample(exifTags),
@@ -373,10 +373,8 @@ export class MetadataService extends BaseService {
 
     const isSidewards = exifTags.Orientation && this.isOrientationSidewards(exifTags.Orientation);
     const assetWidth = validate(isSidewards ? height : width);
-    // Insta360 files are shown stitched (2:1); a .insv only reports its square lens stream
-    const assetHeight = validate(
-      mimeTypes.isInsta360(asset.originalFileName) && width ? width / 2 : isSidewards ? width : height,
-    );
+    // stitched Insta360 files are 2:1; a .insv only reports its square lens stream
+    const assetHeight = validate(insta360?.stitchable && width ? width / 2 : isSidewards ? width : height);
 
     const tasks = new Tasks();
 
@@ -578,6 +576,15 @@ export class MetadataService extends BaseService {
       [width, height] = [exifTags.ImageWidth, exifTags.ImageHeight];
     }
     return { width, height };
+  }
+
+  /** The same check video conversion and photo stitching make, so a metadata refresh agrees with them. */
+  private probeInsta360(path: string) {
+    return this.mediaRepository.probeInsta360(path).catch((error) => {
+      // an I/O failure says nothing about the file: keep the stitched default rather than store "flat"
+      this.logger.warn(`Could not probe Insta360 file ${path}: ${error}`);
+      return { stitchable: true, preview: true };
+    });
   }
 
   private async getExifTags(asset: { originalPath: string; files: AssetFile[]; type: AssetType }) {

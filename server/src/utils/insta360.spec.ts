@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
+  Insta360UnsupportedError,
   Mat3,
   Vec3,
   blendWeight,
@@ -13,6 +14,7 @@ import {
   parseInsta360Trailer,
   qrotate,
 } from 'src/utils/insta360.js';
+import { INSTA360_OFFSET as OFFSET, field, imuSamples, insta360Trailer, record } from 'test/fixtures/insta360.stub.js';
 
 const degreesBetween = (a: Vec3, b: Vec3) =>
   (Math.acos(Math.min(1, Math.max(-1, a[0] * b[0] + a[1] * b[1] + a[2] * b[2]))) * 180) / Math.PI;
@@ -34,26 +36,6 @@ const turningCamera = (n: number) => {
   return { ts, acc, gyr: ts.map(() => w) };
 };
 
-const varint = (value: number) => {
-  const bytes: number[] = [];
-  do {
-    bytes.push((value & 0x7f) | (value >= 0x80 ? 0x80 : 0));
-    value = Math.floor(value / 128);
-  } while (value > 0);
-  return Buffer.from(bytes);
-};
-const field = (number: number, value: number | Buffer) =>
-  typeof value === 'number'
-    ? Buffer.concat([varint(number * 8), varint(value)])
-    : Buffer.concat([varint(number * 8 + 2), varint(value.length), value]);
-const record = (id: number, payload: Buffer) => {
-  const header = Buffer.alloc(6);
-  header.writeUInt16LE(id, 0);
-  header.writeUInt32LE(payload.length, 2);
-  return Buffer.concat([payload, header]);
-};
-const OFFSET =
-  '2_2645.947_2700.400_2678.170_0.717_0.092_89.898_2646.118_8071.690_2674.010_-1.108_0.204_90.231_10752_5376_1137';
 const IDENTITY: Mat3 = [
   [1, 0, 0],
   [0, 1, 0],
@@ -183,7 +165,30 @@ describe('insta360', () => {
   it('picks the lens FOV from the lens guard and refuses unmeasured accessories', () => {
     expect(lensFov(0)).toBe(100);
     expect(lensFov(5)).toBe(97.5);
+    expect(() => lensFov(4)).toThrow(Insta360UnsupportedError);
     expect(() => lensFov(4)).toThrow('offset state 4');
+  });
+
+  it('refuses a calibration that would stitch black', () => {
+    const trailer = parseInsta360Trailer(
+      insta360Trailer(record(0x1_01, field(5, Buffer.from(OFFSET.replace('_10752_', '_0_'))))),
+    );
+    expect(() => insta360Lenses(trailer, 1000, IDENTITY)).toThrow(Insta360UnsupportedError);
+  });
+
+  it('decodes the IMU only up to two minutes past the first frame', () => {
+    const metadata = record(
+      0x1_01,
+      Buffer.concat([field(5, Buffer.from(OFFSET)), field(24, 2_000_000), field(65, Buffer.concat([field(1, 32)]))]),
+    );
+    // 100 Hz from 1 s to 123 s, then the camera turned on its side: past the window, so it can't move the result
+    const kept = imuSamples(12_200, 10_000);
+    const past = imuSamples(800, 10_000, [1024, 0, 0], 1_000_000 + 12_200 * 10_000);
+    const full = parseInsta360Trailer(insta360Trailer(record(0x3_00, Buffer.concat([kept, past])), metadata));
+    const cut = parseInsta360Trailer(insta360Trailer(record(0x3_00, kept), metadata));
+
+    expect(full.imu!.ts.at(-1)).toBeLessThanOrEqual(2_000_000 + 120e6);
+    expect(insta360Orientation(full)).toEqual(insta360Orientation(cut));
   });
 
   it('gives each pixel to the lens that can see it', () => {

@@ -8,6 +8,29 @@ import { mimeTypes } from 'src/utils/mime-types.js';
 
 const execFileAsync = promisify(execFile);
 
+/**
+ * The trailer read's tags over the base read. The base read never sees the trailer's GPS, so it can only
+ * guess the zone (exiftool-vendored's `defaultVideosToUTC`); infer it from the GPS like a normal read would.
+ */
+export const mergeInsta360TrailerTags = (base: ImmichTags, trailer: ImmichTags): ImmichTags => {
+  const tags = { ...base, ...trailer };
+  const latitude = Number(trailer.GPSLatitude);
+  const longitude = Number(trailer.GPSLongitude);
+  const zoneIsGuess = !base.zone || base.zoneSource === 'defaultVideosToUTC';
+  if (zoneIsGuess && Number.isFinite(latitude) && Number.isFinite(longitude) && (latitude !== 0 || longitude !== 0)) {
+    try {
+      // eslint-disable-next-line import-x/no-named-as-default-member
+      const zone = geotz.find(latitude, longitude)[0];
+      if (zone) {
+        Object.assign(tags, { zone, tz: zone, zoneSource: 'GPSLatitude/GPSLongitude' });
+      }
+    } catch {
+      // coordinates geo-tz rejects: keep the base read's zone
+    }
+  }
+  return tags;
+};
+
 interface ExifDuration {
   Value: number;
   Scale?: number;
@@ -185,7 +208,7 @@ export class MetadataRepository {
       this.readInsta360TrailerFields(path),
     ]);
 
-    return { ...baseTags, ...insta360Fields } as ImmichTags;
+    return mergeInsta360TrailerTags(baseTags as ImmichTags, insta360Fields);
   }
 
   /**
@@ -194,7 +217,7 @@ export class MetadataRepository {
    * never overwrite the base read.
    */
   private async readInsta360TrailerFields(path: string): Promise<ImmichTags> {
-    const tags = ['-Model', '-Firmware', '-GPSLatitude', '-GPSLongitude', '-GPSAltitude'];
+    const tags = ['-Make', '-Model', '-Firmware', '-GPSLatitude', '-GPSLongitude', '-GPSAltitude'];
     const args = ['-api', 'largefilesupport=1', '-ee', '-n', ...tags, '-json', path];
 
     try {

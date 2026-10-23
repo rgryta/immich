@@ -40,6 +40,7 @@ import { BoundingBox } from 'src/repositories/machine-learning.repository.js';
 import { BaseService } from 'src/services/base.service.js';
 import { getAssetFile, getDimensions } from 'src/utils/asset.util.js';
 import { checkFaceVisibility, checkOcrVisibility } from 'src/utils/editor.js';
+import { Insta360UnsupportedError } from 'src/utils/insta360.js';
 import { BaseConfig, ThumbnailConfig } from 'src/utils/media.js';
 import { mimeTypes } from 'src/utils/mime-types.js';
 import { batched, clamp } from 'src/utils/misc.js';
@@ -570,8 +571,17 @@ export class MediaService extends BaseService {
     const decoded = await this.mediaRepository.decodeImage(preview, baseOptions);
 
     await Promise.all([
-      this.mediaRepository.generateThumbnail(decoded, { ...image.thumbnail, ...baseOptions }, thumbnailFile.path),
-      this.mediaRepository.generateThumbnail(decoded, { ...image.preview, ...baseOptions }, previewFile.path),
+      // the file rows say isProgressive: false
+      this.mediaRepository.generateThumbnail(
+        decoded,
+        { ...image.thumbnail, ...baseOptions, progressive: false },
+        thumbnailFile.path,
+      ),
+      this.mediaRepository.generateThumbnail(
+        decoded,
+        { ...image.preview, ...baseOptions, progressive: false },
+        previewFile.path,
+      ),
     ]);
 
     const thumbhash = await this.mediaRepository.generateThumbhash(decoded, baseOptions);
@@ -581,6 +591,15 @@ export class MediaService extends BaseService {
       thumbhash,
       fullsizeDimensions: { width: videoStream.width, height: videoStream.height },
     };
+  }
+
+  /** A stitched video is a 2:1 panorama; a single fisheye lens is not, so it is shown flat at its real size. */
+  private async setInsta360Stitched(id: string, stitched: boolean, { width, height }: VideoStreamInfo) {
+    await this.assetRepository.upsertExif({
+      exif: { assetId: id, projectionType: stitched ? 'EQUIRECTANGULAR' : null },
+      lockedPropertiesBehavior: 'skip',
+    });
+    await this.assetRepository.update({ id, width, height: stitched ? width / 2 : height });
   }
 
   @OnJob({ name: JobName.AssetEncodeVideoQueueAll, queue: QueueName.VideoConversion })
@@ -630,16 +649,16 @@ export class MediaService extends BaseService {
           path: output,
           isEdited: false,
         });
+        await this.setInsta360Stitched(asset.id, true, videoStream);
         return JobStatus.Success;
       } catch (error: any) {
+        // I/O and ffmpeg failures fail the job so it can be retried
+        if (!(error instanceof Insta360UnsupportedError)) {
+          throw error;
+        }
         // e.g. another Insta360 model: still give it a playable, if unstitched, video
         this.logger.warn(`Could not stitch Insta360 video ${asset.id}, transcoding it unstitched: ${error.message}`);
-        // a single fisheye lens is not a panorama: show it flat, at its real size
-        await this.assetRepository.upsertExif({
-          exif: { assetId: asset.id, projectionType: null },
-          lockedPropertiesBehavior: 'skip',
-        });
-        await this.assetRepository.update({ id: asset.id, width: videoStream.width, height: videoStream.height });
+        await this.setInsta360Stitched(asset.id, false, videoStream);
       }
     }
 

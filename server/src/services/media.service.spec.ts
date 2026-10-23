@@ -22,6 +22,7 @@ import {
   VideoCodec,
 } from 'src/enum.js';
 import { MediaService } from 'src/services/media.service.js';
+import { Insta360UnsupportedError } from 'src/utils/insta360.js';
 import { AssetFaceFactory } from 'test/factories/asset-face.factory.js';
 import { AssetFactory } from 'test/factories/asset.factory.js';
 import { PersonFactory } from 'test/factories/person.factory.js';
@@ -562,6 +563,11 @@ describe(MediaService.name, () => {
 
       expect(mocks.media.extractInsta360Preview).toHaveBeenCalledWith('/original/VID_1.insv');
       expect(mocks.media.transcode).not.toHaveBeenCalled();
+      expect(mocks.media.generateThumbnail).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ progressive: false }),
+        expect.any(String),
+      );
     });
 
     it('should fall back to a video frame when the Insta360 preview is unusable', async () => {
@@ -973,6 +979,20 @@ describe(MediaService.name, () => {
 
       expect(mocks.media.extract).toHaveBeenCalledWith('/original/IMG_1.insp');
       expect(mocks.media.decodeImage).toHaveBeenCalledWith(extractedBuffer, expect.anything());
+    });
+
+    it('should use the small Insta360 trailer preview rather than the raw fisheye original', async () => {
+      const asset = AssetFactory.from({ originalFileName: 'IMG_1.insp', originalPath: '/original/IMG_1.insp' })
+        .exif()
+        .build();
+      mocks.media.extract.mockResolvedValue({ buffer: extractedBuffer, format: RawExtractedFormat.Jpeg });
+      mocks.media.getImageMetadata.mockResolvedValue({ width: 1280, height: 640, isTransparent: false });
+      mocks.assetJob.getForGenerateThumbnailJob.mockResolvedValue(getForGenerateThumbnail(asset));
+
+      await sut.handleGenerateThumbnails({ id: asset.id });
+
+      expect(mocks.media.decodeImage).toHaveBeenCalledWith(extractedBuffer, expect.anything());
+      expect(mocks.media.decodeImage).not.toHaveBeenCalledWith('/original/IMG_1.insp', expect.anything());
     });
 
     it('should not check transparency metadata for raw files without extracted images', async () => {
@@ -2086,6 +2106,21 @@ describe(MediaService.name, () => {
 
       expect(mocks.media.stitchInsta360Video).toHaveBeenCalledWith('/original/VID_1.insv', expect.any(String));
       expect(mocks.media.transcode).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({ exif: { assetId: asset.id, projectionType: 'EQUIRECTANGULAR' } }),
+      );
+      const { width } = asset.videoStream;
+      expect(mocks.asset.update).toHaveBeenCalledWith({ id: asset.id, width, height: width / 2 });
+    });
+
+    it('should fail, not flatten, an Insta360 video whose stitch hit an I/O error', async () => {
+      mocks.assetJob.getForVideoConversion.mockResolvedValue({ ...asset, originalPath: '/original/VID_1.insv' });
+      mocks.media.stitchInsta360Video.mockRejectedValue(new Error('ENOSPC: no space left on device'));
+
+      await expect(sut.handleVideoConversion({ id: 'video-id' })).rejects.toThrow('ENOSPC');
+
+      expect(mocks.media.transcode).not.toHaveBeenCalled();
+      expect(mocks.asset.upsertExif).not.toHaveBeenCalled();
     });
 
     it('should transcode an Insta360 video unstitched when it cannot be stitched', async () => {
@@ -2095,7 +2130,7 @@ describe(MediaService.name, () => {
         ...probeStub.multipleVideoStreams,
         originalPath: '/original/VID_1.insv',
       });
-      mocks.media.stitchInsta360Video.mockRejectedValue(new Error('unsupported lens type 87'));
+      mocks.media.stitchInsta360Video.mockRejectedValue(new Insta360UnsupportedError('unsupported lens type 87'));
 
       await sut.handleVideoConversion({ id: 'video-id' });
 

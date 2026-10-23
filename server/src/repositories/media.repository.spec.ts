@@ -1,4 +1,4 @@
-import { mkdtempDisposableSync, statSync } from 'node:fs';
+import { mkdtempDisposableSync, mkdtempSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import sharp from 'sharp';
@@ -6,6 +6,7 @@ import { AssetEditAction, MirrorAxis } from 'src/dtos/editing.dto.js';
 import { Colorspace, ImageFormat } from 'src/enum.js';
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import { MediaRepository } from 'src/repositories/media.repository.js';
+import { INSTA360_OFFSET, field, imuSamples, insta360FileTail, record } from 'test/fixtures/insta360.stub.js';
 import { automock } from 'test/utils.js';
 
 const getPixelColor = async (buffer: Buffer, x: number, y: number) => {
@@ -59,6 +60,24 @@ const buildTestQuadImage = async () => {
 
   return image.png().toBuffer();
 };
+
+const insta360File = (contents: Buffer) => {
+  const path = join(mkdtempSync(join(tmpdir(), 'insta360-')), 'IMG_1.insp');
+  writeFileSync(path, contents);
+  return path;
+};
+
+/** A minimal X5 photo: a JPEG stand-in, then a trailer with IMU, calibration and lens guard state. */
+const x5File = (offsetState: number) =>
+  insta360File(
+    Buffer.concat([
+      Buffer.from('jpeg'),
+      insta360FileTail(
+        record(0x3_00, imuSamples(2, 1000)),
+        record(0x1_01, Buffer.concat([field(5, Buffer.from(INSTA360_OFFSET)), field(68, offsetState)])),
+      ),
+    ]),
+  );
 
 describe(MediaRepository.name, () => {
   let sut: MediaRepository;
@@ -317,6 +336,21 @@ describe(MediaRepository.name, () => {
 
       expect(await getPixelColor(buffer, 10, 10)).toEqual({ r: 255, g: 0, b: 0 });
       expect(await getPixelColor(buffer, 990, 10)).toEqual({ r: 0, g: 0, b: 255 });
+    });
+  });
+
+  describe('probeInsta360', () => {
+    it('should tell a stitchable file from one it cannot stitch', async () => {
+      await expect(sut.probeInsta360(x5File(0))).resolves.toEqual({ stitchable: true, preview: false });
+      await expect(sut.probeInsta360(x5File(4))).resolves.toEqual({ stitchable: false, preview: false });
+      await expect(sut.probeInsta360(insta360File(Buffer.from('a jpeg with no trailer')))).resolves.toEqual({
+        stitchable: false,
+        preview: false,
+      });
+    });
+
+    it('should not mistake an unreadable file for an unsupported one', async () => {
+      await expect(sut.probeInsta360('/nonexistent/IMG_1.insp')).rejects.toThrow('ENOENT');
     });
   });
 

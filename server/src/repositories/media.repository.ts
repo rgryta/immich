@@ -42,6 +42,7 @@ import {
 import { LoggingRepository } from 'src/repositories/logging.repository.js';
 import {
   INSTA360_TAIL_LENGTH,
+  Insta360UnsupportedError,
   blendWeight,
   forEachInsta360Row,
   insta360Lenses,
@@ -94,21 +95,6 @@ export class MediaRepository {
    * @returns ExtractResult if succeeded, or null if failed
    */
   async extract(input: string): Promise<ExtractResult | null> {
-    for (const { tag, format } of [
-      { tag: 'JpgFromRaw2', format: RawExtractedFormat.Jpeg },
-      { tag: 'JpgFromRaw', format: RawExtractedFormat.Jpeg },
-      { tag: 'PreviewJXL', format: RawExtractedFormat.Jxl },
-      { tag: 'PreviewImage', format: RawExtractedFormat.Jpeg },
-    ]) {
-      try {
-        const buffer = await exiftool.extractBinaryTagToBuffer(tag, input);
-        this.logger.debug(`Successfully extracted ${tag} buffer from image`);
-        return { buffer, format };
-      } catch (error: any) {
-        this.logger.debug(`Could not extract ${tag} buffer from image: ${error}`);
-      }
-    }
-
     if (mimeTypes.isInsta360(input)) {
       // Insta360's raw dual-fisheye photos have both fisheye circles in one JPEG -
       // stitch them into a full-resolution equirectangular photo (see stitchInsta360Photo).
@@ -125,6 +111,21 @@ export class MediaRepository {
         return { buffer: await this.extractInsta360Preview(input), format: RawExtractedFormat.Jpeg };
       } catch (error: any) {
         this.logger.warn(`Could not read the Insta360 preview of ${input}: ${error}`);
+      }
+    }
+
+    for (const { tag, format } of [
+      { tag: 'JpgFromRaw2', format: RawExtractedFormat.Jpeg },
+      { tag: 'JpgFromRaw', format: RawExtractedFormat.Jpeg },
+      { tag: 'PreviewJXL', format: RawExtractedFormat.Jxl },
+      { tag: 'PreviewImage', format: RawExtractedFormat.Jpeg },
+    ]) {
+      try {
+        const buffer = await exiftool.extractBinaryTagToBuffer(tag, input);
+        this.logger.debug(`Successfully extracted ${tag} buffer from image`);
+        return { buffer, format };
+      } catch (error: any) {
+        this.logger.debug(`Could not extract ${tag} buffer from image: ${error}`);
       }
     }
 
@@ -476,9 +477,9 @@ export class MediaRepository {
   async stitchInsta360Video(input: string, output: string): Promise<void> {
     const trailer = await this.readInsta360Trailer(input);
     const { streams } = await probe(input, []);
-    const stream = streams.find((stream) => stream.codec_type === 'video');
-    if (!stream?.width) {
-      throw new Error('no video stream');
+    const [stream, ...others] = streams.filter((stream) => stream.codec_type === 'video');
+    if (!stream?.width || others.length === 0) {
+      throw new Insta360UnsupportedError('expected one video stream per lens');
     }
     const width = stream.width;
     const lensHeight = stream.height ?? width;
@@ -581,7 +582,7 @@ export class MediaRepository {
     const { data, info } = await sharp(input).raw().toBuffer({ resolveWithObject: true });
     const { width, height, channels } = info;
     if (width !== 2 * height) {
-      throw new Error(`unexpected .insp layout ${width}x${height}`);
+      throw new Insta360UnsupportedError(`unexpected .insp layout ${width}x${height}`);
     }
     const lensData = insta360Lenses(trailer, height, insta360Orientation(trailer));
     const out = Buffer.alloc(data.length);
@@ -636,6 +637,22 @@ export class MediaRepository {
     return sharp(insta360PreviewRgb(preview), { raw: { width, height, channels: 3 } })
       .jpeg()
       .toBuffer();
+  }
+
+  /** Whether an Insta360 file can be stitched, and whether its trailer carries the camera's own stitched preview. */
+  async probeInsta360(input: string): Promise<{ stitchable: boolean; preview: boolean }> {
+    let preview = false;
+    try {
+      const trailer = await this.readInsta360Trailer(input);
+      preview = !!trailer.preview;
+      insta360Lenses(trailer, 1, insta360Orientation(trailer));
+      return { stitchable: true, preview };
+    } catch (error) {
+      if (error instanceof Insta360UnsupportedError) {
+        return { stitchable: false, preview };
+      }
+      throw error;
+    }
   }
 
   /** Reads only the trailer at the end of the file (videos are several GB). */

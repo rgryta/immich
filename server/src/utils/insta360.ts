@@ -42,6 +42,9 @@ const TRAILER_MAGIC = '8db42d694ccc418790edff439fe026bf';
 const GRAVITY_BOX_WINDOW_S = 10; // GyroProcessImpl +0x88
 const GRAVITY_LOWPASS_HZ = 0.02; // iirf::getButterCoeff(fs, 0.02, 2), then iirf::filtFilt
 const QUAT_TIME_OFFSET_S = 0.001; // pushGLMatrix(q, (t_prev + t_cur) / 2 + 0.001)
+// IMU decoded past the first frame; the 0.02 Hz filtfilt gives later samples no weight, and a long
+// recording's whole IMU stream would otherwise cost ~1 GB of heap per 30 min
+const IMU_WINDOW_US = 120e6;
 
 // Signed-permutation frames of Studio's orientation chain: ins::AlignAxes for the X5 gyro
 // type, and the sphere <- camera / output <- sphere conventions of the render model.
@@ -61,6 +64,9 @@ const SPHERE_OUT: Mat3 = [
   [0, -1, 0],
 ];
 
+/** The file itself cannot be stitched (another camera, accessory or trailer layout), as opposed to an I/O failure. */
+export class Insta360UnsupportedError extends Error {}
+
 export type Insta360Trailer = {
   offset: number[];
   offsetState: number;
@@ -79,7 +85,7 @@ export const INSTA360_TAIL_LENGTH = 78;
 export const insta360TrailerLength = (tail: Buffer, fileSize: number) => {
   const length = tail.length === INSTA360_TAIL_LENGTH ? tail.readUInt32LE(38) : 0;
   if (tail.toString('latin1', 46) !== TRAILER_MAGIC || length < INSTA360_TAIL_LENGTH || length > fileSize) {
-    throw new Error('no Insta360 trailer');
+    throw new Insta360UnsupportedError('no Insta360 trailer');
   }
   return length;
 };
@@ -111,7 +117,7 @@ export const parseInsta360Trailer = (trailer: Buffer): Insta360Trailer => {
 
   const metadata = records.get(RECORD_EXTRA_METADATA);
   if (!metadata) {
-    throw new Error('no ExtraMetadata record in trailer');
+    throw new Insta360UnsupportedError('no ExtraMetadata record in trailer');
   }
   const result: Insta360Trailer = { offset: [], offsetState: 0, accRange: 8, gyroRange: 2000 };
   for (const { field, value } of protobufFields(metadata)) {
@@ -132,12 +138,16 @@ export const parseInsta360Trailer = (trailer: Buffer): Insta360Trailer => {
     }
   }
   if (result.offset.length !== 16 || result.offset.some((value) => !Number.isFinite(value))) {
-    throw new Error('no ExtraMetadata calibration offset');
+    throw new Insta360UnsupportedError('no ExtraMetadata calibration offset');
   }
 
   const imu = records.get(RECORD_IMU);
   if (imu && imu.length >= 20) {
-    const count = Math.floor(imu.length / 20);
+    const limit = (result.firstFrameUs ?? Number(imu.readBigUInt64LE(0))) + IMU_WINDOW_US;
+    let count = 0;
+    while (count < Math.floor(imu.length / 20) && Number(imu.readBigUInt64LE(count * 20)) <= limit) {
+      count++;
+    }
     const ts = new Float64Array(count);
     const raw = new Uint16Array(count * 6);
     for (let i = 0; i < count; i++) {
@@ -146,7 +156,9 @@ export const parseInsta360Trailer = (trailer: Buffer): Insta360Trailer => {
         raw[i * 6 + k] = imu.readUInt16LE(i * 20 + 8 + k * 2);
       }
     }
-    result.imu = { ts, raw };
+    if (count > 0) {
+      result.imu = { ts, raw };
+    }
   }
 
   // [u32 1][u32 record length][u32 1][u32 0][u32 width][u32 height], padded to 40 bytes, then NV12
@@ -174,7 +186,7 @@ function* protobufFields(buffer: Buffer): Generator<{ field: number; value: numb
       }
       shift *= 128;
     }
-    throw new Error('truncated protobuf');
+    throw new Insta360UnsupportedError('truncated protobuf');
   };
   while (i < buffer.length) {
     const tag = varint();
@@ -404,7 +416,7 @@ export const boxGravityQuats = (ts: number[], acc: Vec3[], gyr: Vec3[]) => {
 // a zero gravity sample would otherwise stitch an all-black image without any error
 const finite = (m: Mat3) => {
   if (m.flat().some((value) => !Number.isFinite(value))) {
-    throw new Error('IMU gives no usable gravity');
+    throw new Insta360UnsupportedError('IMU gives no usable gravity');
   }
   return m;
 };
@@ -421,7 +433,7 @@ export const insta360Orientation = (trailer: Insta360Trailer): Mat3 => {
   const { imu, accRange, gyroRange, firstFrameUs, offset } = trailer;
   if (!imu) {
     // without gravity there is no "up", and an unlevelled X5 frame is not upright either
-    throw new Error('no IMU record in trailer');
+    throw new Insta360UnsupportedError('no IMU record in trailer');
   }
   const lens0 = rotateMatrix(offset[4], offset[5], offset[6]);
   const count = imu.ts.length;
@@ -499,11 +511,14 @@ export const insta360Lenses = (trailer: Insta360Trailer, lensSize: number, level
   const [, r0, cx0, cy0, rx0, ry0, rz0, r1, cx1, cy1, rx1, ry1, rz1, calibWidth, , lensWord] = trailer.offset;
   const coeffs = COEFF_BY_LENSTYPE[lensWord & 0xff];
   if (!coeffs) {
-    throw new Error(`unsupported lens type ${lensWord & 0xff} (only the Insta360 X5 is supported)`);
+    throw new Insta360UnsupportedError(`unsupported lens type ${lensWord & 0xff} (only the Insta360 X5 is supported)`);
   }
   const halfFov = HALF_FOV_BY_OFFSET_STATE[trailer.offsetState];
   if (halfFov === undefined) {
-    throw new Error(`unsupported lens guard or accessory (offset state ${trailer.offsetState})`);
+    throw new Insta360UnsupportedError(`unsupported lens guard or accessory (offset state ${trailer.offsetState})`);
+  }
+  if (!(calibWidth > 0 && r0 > 0 && r1 > 0)) {
+    throw new Insta360UnsupportedError('invalid lens calibration');
   }
   const scale = (2 * lensSize) / calibWidth;
   const p = mul(axisRotation('x', 90), axisRotation('y', 90));

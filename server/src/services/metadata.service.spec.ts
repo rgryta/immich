@@ -1852,6 +1852,55 @@ describe(MetadataService.name, () => {
 
       await sut.handleMetadataExtraction({ id: asset.id });
       expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ width: 3840, height: 1920 }));
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({ exif: expect.objectContaining({ projectionType: 'EQUIRECTANGULAR' }) }),
+      );
+    });
+
+    it('should show an Insta360 video that cannot be stitched flat, at its real size', async () => {
+      const asset = AssetFactory.create({ type: AssetType.Video, originalFileName: 'VID_1.insv' });
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      const stub = videoInfoStub.videoStreamVertical2160p;
+      mocks.media.probe.mockResolvedValue({
+        ...stub,
+        videoStreams: [{ ...stub.videoStreams[0], width: 3840, height: 3840, rotation: 0 }],
+      });
+      mocks.media.probeInsta360.mockResolvedValue({ stitchable: false, preview: true });
+      mockReadTags({});
+
+      await sut.handleMetadataExtraction({ id: asset.id });
+      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ width: 3840, height: 3840 }));
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({ exif: expect.objectContaining({ projectionType: null }) }),
+      );
+    });
+
+    it('should show an unstitchable Insta360 photo as its equirectangular preview, or flat without one', async () => {
+      const asset = AssetFactory.create({ originalFileName: 'IMG_1.insp' });
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      const projection = async (preview: boolean) => {
+        mocks.media.probeInsta360.mockResolvedValue({ stitchable: false, preview });
+        mockReadTags({ ImageWidth: 11_904, ImageHeight: 5952 });
+        await sut.handleMetadataExtraction({ id: asset.id });
+        return mocks.asset.upsertExif.mock.lastCall?.[0].exif.projectionType;
+      };
+
+      await expect(projection(true)).resolves.toBe('EQUIRECTANGULAR');
+      await expect(projection(false)).resolves.toBeNull();
+    });
+
+    it('should keep the stitched default when the Insta360 probe cannot read the file', async () => {
+      const asset = AssetFactory.create({ originalFileName: 'IMG_1.insp' });
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      mocks.media.probeInsta360.mockRejectedValue(new Error('EIO: i/o error'));
+      mockReadTags({ Firmware: 'v1.11.10_build1' });
+
+      await sut.handleMetadataExtraction({ id: asset.id });
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({
+          exif: expect.objectContaining({ projectionType: 'EQUIRECTANGULAR', firmware: 'v1.11.10_build1' }),
+        }),
+      );
     });
 
     it('should properly swap asset width/height for rotated images', async () => {
