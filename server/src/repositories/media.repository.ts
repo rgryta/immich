@@ -639,12 +639,17 @@ export class MediaRepository {
       .toBuffer();
   }
 
-  /** Whether an Insta360 file can be stitched, and whether its trailer carries the camera's own stitched preview. */
-  async probeInsta360(input: string): Promise<{ stitchable: boolean; preview: boolean }> {
+  /**
+   * Whether an Insta360 file can be stitched, whether its trailer carries the camera's own stitched preview,
+   * and the camera's local time the trailer records.
+   */
+  async probeInsta360(input: string): Promise<{ stitchable: boolean; preview: boolean; localTime?: string }> {
     let preview = false;
+    let localTime: string | undefined;
     try {
       const trailer = await this.readInsta360Trailer(input);
       preview = !!trailer.preview;
+      localTime = trailer.localTime;
       insta360Lenses(trailer, 1, insta360Orientation(trailer));
       // the stitchers' own checks on the media itself, so the probe can never disagree with them
       if (mimeTypes.isVideo(input)) {
@@ -653,10 +658,10 @@ export class MediaRepository {
         const { width = 0, height = 0 } = await sharp(input).metadata();
         assertInsta360PhotoLayout(width, height);
       }
-      return { stitchable: true, preview };
+      return { stitchable: true, preview, localTime };
     } catch (error) {
       if (error instanceof Insta360UnsupportedError) {
-        return { stitchable: false, preview };
+        return { stitchable: false, preview, localTime };
       }
       throw error;
     }

@@ -87,6 +87,7 @@ describe('insta360', () => {
   it('parses calibration, ranges and IMU from the trailer', () => {
     const metadata = Buffer.concat([
       field(5, Buffer.from(OFFSET)),
+      field(7, 20_260_821_105_307),
       field(24, 1_000_000),
       field(65, Buffer.concat([field(1, 32), field(2, 2000)])),
     ]);
@@ -101,7 +102,12 @@ describe('insta360', () => {
     );
     expect(trailer.offset).toHaveLength(16);
     expect(trailer.offset[15]).toBe(1137);
-    expect(trailer).toMatchObject({ firstFrameUs: 1_000_000, accRange: 32, gyroRange: 2000 });
+    expect(trailer).toMatchObject({
+      localTime: '20260821105307',
+      firstFrameUs: 1_000_000,
+      accRange: 32,
+      gyroRange: 2000,
+    });
     expect(trailer.imu?.ts).toEqual(new Float64Array([1_000_000, 1_001_000]));
 
     // two samples are far too few for the gravity box: single-gyro fallback, a proper rotation

@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { ContainerDirectoryItem, ExifDateTime, Tags } from 'exiftool-vendored';
 import { Insertable } from 'kysely';
 import { isUndefined, omitBy, pick } from 'lodash-es';
-import { DateTime, Duration } from 'luxon';
+import { DateTime, Duration, FixedOffsetZone } from 'luxon';
 import { Stats } from 'node:fs';
 import { constants } from 'node:fs/promises';
 import { join, parse } from 'node:path';
@@ -244,7 +244,7 @@ export class MetadataService extends BaseService {
     const { tags: exifTags, audio, video, packets, format } = exifResult;
     this.logger.verbose('Exif Tags', exifTags);
 
-    const dates = this.getDates(asset, exifTags, stats);
+    const dates = this.getDates(asset, this.withInsta360Zone(exifTags, insta360?.localTime), stats);
 
     const { width, height } = this.getImageDimensions(exifTags);
     let geo: ReverseGeocodeResult = { country: null, state: null, city: null },
@@ -578,12 +578,29 @@ export class MetadataService extends BaseService {
     return { width, height };
   }
 
+  /**
+   * An .insv's dates are UTC, so without GPS exiftool-vendored can only guess the zone (`defaultVideosToUTC`).
+   * Its trailer also keeps the camera's local time: like `inferTimezoneFromDatestamps`, the pair gives the zone.
+   */
+  private withInsta360Zone(tags: ImmichTags, localTime?: string): ImmichTags {
+    const utc = firstDateTime(tags)?.dateTime;
+    const local = localTime ? DateTime.fromFormat(localTime, 'yyyyMMddHHmmss', { zone: 'UTC' }) : undefined;
+    if (tags.zoneSource !== 'defaultVideosToUTC' || !utc?.hasZone || !local?.isValid) {
+      return tags;
+    }
+    const minutes = Math.round(local.diff(utc.toDateTime(), 'minutes').minutes / 15) * 15;
+    if (Math.abs(minutes) > 14 * 60) {
+      return tags;
+    }
+    return { ...tags, zone: FixedOffsetZone.instance(minutes).name, zoneSource: 'Insta360 creation_time' };
+  }
+
   /** The same check video conversion and photo stitching make, so a metadata refresh agrees with them. */
   private probeInsta360(path: string) {
     return this.mediaRepository.probeInsta360(path).catch((error) => {
       // an I/O failure says nothing about the file: keep the stitched default rather than store "flat"
       this.logger.warn(`Could not probe Insta360 file ${path}: ${error}`);
-      return { stitchable: true, preview: true };
+      return { stitchable: true, preview: true, localTime: undefined };
     });
   }
 

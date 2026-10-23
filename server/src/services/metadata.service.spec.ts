@@ -1857,6 +1857,38 @@ describe(MetadataService.name, () => {
       );
     });
 
+    it('should take an Insta360 video zone from the camera clock instead of guessing UTC', async () => {
+      const asset = AssetFactory.create({ type: AssetType.Video, originalFileName: 'VID_1.insv' });
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      mocks.media.probe.mockResolvedValue(videoInfoStub.videoStreamH264);
+      // the camera read 10:53:07 while the file says 02:53:07 UTC: it was on UTC+8
+      mocks.media.probeInsta360.mockResolvedValue({ stitchable: true, preview: true, localTime: '20260821105307' });
+      const utc = { zone: 'UTC', zoneSource: 'defaultVideosToUTC' } as const;
+      mockReadTags({ CreateDate: ExifDateTime.fromISO('2026-08-21T02:53:07Z'), ...utc });
+
+      await sut.handleMetadataExtraction({ id: asset.id });
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({ exif: expect.objectContaining({ timeZone: 'UTC+8' }) }),
+      );
+      expect(mocks.asset.update).toHaveBeenCalledWith(
+        expect.objectContaining({ localDateTime: new Date('2026-08-21T10:53:07.000Z') }),
+      );
+    });
+
+    it('should not let the Insta360 camera clock override a real zone', async () => {
+      const asset = AssetFactory.create({ type: AssetType.Video, originalFileName: 'VID_1.insv' });
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      mocks.media.probe.mockResolvedValue(videoInfoStub.videoStreamH264);
+      mocks.media.probeInsta360.mockResolvedValue({ stitchable: true, preview: true, localTime: '20260821105307' });
+      const gps = { zone: 'Europe/Warsaw', zoneSource: 'GPSLatitude/GPSLongitude' };
+      mockReadTags({ CreateDate: ExifDateTime.fromISO('2026-08-21T02:53:07Z'), ...gps });
+
+      await sut.handleMetadataExtraction({ id: asset.id });
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({ exif: expect.objectContaining({ timeZone: 'Europe/Warsaw' }) }),
+      );
+    });
+
     it('should show an Insta360 video that cannot be stitched flat, at its real size', async () => {
       const asset = AssetFactory.create({ type: AssetType.Video, originalFileName: 'VID_1.insv' });
       mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));

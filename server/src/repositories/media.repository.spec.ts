@@ -80,7 +80,10 @@ const x5File = async (name: string, offsetState: number, width = 4, height = 2) 
         .toBuffer(),
       insta360FileTail(
         record(0x3_00, imuSamples(2, 1000)),
-        record(0x1_01, Buffer.concat([field(5, Buffer.from(INSTA360_OFFSET)), field(68, offsetState)])),
+        record(
+          0x1_01,
+          Buffer.concat([field(5, Buffer.from(INSTA360_OFFSET)), field(7, 20_260_821_105_307), field(68, offsetState)]),
+        ),
       ),
     ]),
   );
@@ -350,15 +353,18 @@ describe(MediaRepository.name, () => {
       await expect(sut.probeInsta360(await x5File('IMG_bare.insp', 0))).resolves.toEqual({
         stitchable: true,
         preview: false,
+        localTime: '20260821105307',
       });
       await expect(sut.probeInsta360(await x5File('IMG_guard.insp', 4))).resolves.toEqual({
         stitchable: false,
         preview: false,
+        localTime: '20260821105307',
       });
       // the stitch refuses a photo that isn't two side-by-side lenses, so the probe must too
       await expect(sut.probeInsta360(await x5File('IMG_square.insp', 0, 3, 3))).resolves.toEqual({
         stitchable: false,
         preview: false,
+        localTime: '20260821105307',
       });
       await expect(sut.probeInsta360(insta360File('IMG_none.insp', Buffer.from('no trailer')))).resolves.toEqual({
         stitchable: false,

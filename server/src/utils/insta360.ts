@@ -70,6 +70,7 @@ export class Insta360UnsupportedError extends Error {}
 export type Insta360Trailer = {
   offset: number[];
   offsetState: number;
+  localTime?: string; // creation_time: the camera's wall clock as YYYYMMDDhhmmss
   firstFrameUs?: number;
   accRange: number;
   gyroRange: number;
@@ -123,6 +124,8 @@ export const parseInsta360Trailer = (trailer: Buffer): Insta360Trailer => {
   for (const { field, value } of protobufFields(metadata)) {
     if (field === 5 && Buffer.isBuffer(value) && result.offset.length === 0) {
       result.offset = value.toString('ascii').split('_').map(Number);
+    } else if (field === 7 && typeof value === 'number') {
+      result.localTime = String(value);
     } else if (field === 24 && typeof value === 'number') {
       result.firstFrameUs = value;
     } else if (field === 68 && typeof value === 'number') {
