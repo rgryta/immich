@@ -1841,7 +1841,9 @@ describe(MetadataService.name, () => {
     });
 
     it('should give Insta360 videos the 2:1 size of their stitched form', async () => {
-      const asset = AssetFactory.create({ type: AssetType.Video, originalFileName: 'VID_1.insv' });
+      const asset = AssetFactory.from({ type: AssetType.Video, originalFileName: 'VID_1.insv' })
+        .files([AssetFileType.EncodedVideo])
+        .build();
       mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
       const stub = videoInfoStub.videoStreamVertical2160p;
       mocks.media.probe.mockResolvedValue({
@@ -1889,6 +1891,38 @@ describe(MetadataService.name, () => {
       );
     });
 
+    it('should show an Insta360 video flat until its stitched encode exists', async () => {
+      const asset = AssetFactory.create({ type: AssetType.Video, originalFileName: 'VID_1.insv' });
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      const stub = videoInfoStub.videoStreamVertical2160p;
+      mocks.media.probe.mockResolvedValue({
+        ...stub,
+        videoStreams: [{ ...stub.videoStreams[0], width: 3840, height: 3840, rotation: 0 }],
+      });
+      mockReadTags({});
+
+      await sut.handleMetadataExtraction({ id: asset.id });
+      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ width: 3840, height: 3840 }));
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({ exif: expect.objectContaining({ projectionType: null }) }),
+      );
+    });
+
+    it('should not invent a zone from a drifted Insta360 camera clock', async () => {
+      const asset = AssetFactory.create({ type: AssetType.Video, originalFileName: 'VID_1.insv' });
+      mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
+      mocks.media.probe.mockResolvedValue(videoInfoStub.videoStreamH264);
+      // 9 minutes past UTC+2: no real offset is that close
+      mocks.media.probeInsta360.mockResolvedValue({ stitchable: true, preview: true, localTime: '20260821050207' });
+      const utc = { zone: 'UTC', zoneSource: 'defaultVideosToUTC' } as const;
+      mockReadTags({ CreateDate: ExifDateTime.fromISO('2026-08-21T02:53:07Z'), ...utc });
+
+      await sut.handleMetadataExtraction({ id: asset.id });
+      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
+        expect.objectContaining({ exif: expect.objectContaining({ timeZone: 'UTC' }) }),
+      );
+    });
+
     it('should show an Insta360 video that cannot be stitched flat, at its real size', async () => {
       const asset = AssetFactory.create({ type: AssetType.Video, originalFileName: 'VID_1.insv' });
       mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
@@ -1921,18 +1955,17 @@ describe(MetadataService.name, () => {
       await expect(projection(false)).resolves.toBeNull();
     });
 
-    it('should keep the stitched default when the Insta360 probe cannot read the file', async () => {
-      const asset = AssetFactory.create({ originalFileName: 'IMG_1.insp' });
+    it('should keep the stored panorama state when the Insta360 probe cannot read the file', async () => {
+      const asset = AssetFactory.create({ originalFileName: 'IMG_1.insp', width: 11_904, height: 5952 });
       mocks.assetJob.getForMetadataExtraction.mockResolvedValue(getForMetadataExtraction(asset));
       mocks.media.probeInsta360.mockRejectedValue(new Error('EIO: i/o error'));
-      mockReadTags({ Firmware: 'v1.11.10_build1' });
+      mockReadTags({ Firmware: 'v1.11.10_build1', ImageWidth: 11_904, ImageHeight: 11_904 });
 
       await sut.handleMetadataExtraction({ id: asset.id });
-      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
-        expect.objectContaining({
-          exif: expect.objectContaining({ projectionType: 'EQUIRECTANGULAR', firmware: 'v1.11.10_build1' }),
-        }),
-      );
+      const { exif } = mocks.asset.upsertExif.mock.lastCall![0];
+      expect(exif).toMatchObject({ firmware: 'v1.11.10_build1' });
+      expect(exif.projectionType).toBeUndefined();
+      expect(mocks.asset.update).toHaveBeenCalledWith(expect.objectContaining({ height: 5952 }));
     });
 
     it('should properly swap asset width/height for rotated images', async () => {

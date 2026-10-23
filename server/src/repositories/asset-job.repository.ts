@@ -146,11 +146,12 @@ export class AssetJobRepository {
 
   @GenerateSql({ params: [DummyValue.UUID] })
   getForMetadataExtraction(id: string) {
+    // all files: the sidecar, and for Insta360 videos whether the stitched encode exists yet
     return this.db
       .selectFrom('asset')
       .select(columns.asset)
       .select(withFaces)
-      .select((eb) => withFiles(eb, AssetFileType.Sidecar))
+      .select((eb) => withFiles(eb))
       .innerJoin('user', 'user.id', 'asset.ownerId')
       .select(['user.clusterGroupId'])
       .where('asset.id', '=', id)

@@ -652,14 +652,13 @@ export class MediaService extends BaseService {
         await this.setInsta360Stitched(asset.id, true, videoStream);
         return JobStatus.Success;
       } catch (error: any) {
-        // until a stitch succeeds, the raw original is what plays: never as a panorama
-        await this.setInsta360Stitched(asset.id, false, videoStream);
-        // I/O and ffmpeg failures fail the job so it can be retried
+        // I/O and ffmpeg failures fail the job so it can be retried; a re-run keeps its working stitched video
         if (!(error instanceof Insta360UnsupportedError)) {
           throw error;
         }
         // e.g. another Insta360 model: still give it a playable, if unstitched, video
         this.logger.warn(`Could not stitch Insta360 video ${asset.id}, transcoding it unstitched: ${error.message}`);
+        await this.setInsta360Stitched(asset.id, false, videoStream);
       }
     }
 

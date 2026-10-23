@@ -246,6 +246,14 @@ export class MetadataService extends BaseService {
 
     const dates = this.getDates(asset, this.withInsta360Zone(exifTags, insta360?.localTime), stats);
 
+    // Insta360 raw dual-fisheye files have no GPano tag. A video is a panorama once its stitched encode exists
+    // (until then the raw lens is what plays); a photo is shown stitched, or as the camera's own preview.
+    const isImage = asset.type === AssetType.Image;
+    const insta360Stitched = !!insta360?.stitchable && (isImage || !!getAssetFiles(asset.files).encodedVideoFile);
+    // a failed probe says nothing about the file (undefined keeps what is stored)
+    const insta360Projection =
+      insta360 === null ? undefined : insta360Stitched || (isImage && insta360?.preview) ? 'EQUIRECTANGULAR' : null;
+
     const { width, height } = this.getImageDimensions(exifTags);
     let geo: ReverseGeocodeResult = { country: null, state: null, city: null },
       latitude: number | null = null,
@@ -280,13 +288,7 @@ export class MetadataService extends BaseService {
       exifImageHeight: validate(height),
       exifImageWidth: validate(width),
       orientation: validate(exifTags.Orientation)?.toString() ?? null,
-      // Insta360 raw dual-fisheye files have no GPano tag; they are shown stitched, or (photos) as the
-      // camera's own equirectangular preview when they can't be
-      projectionType: exifTags.ProjectionType
-        ? exifTags.ProjectionType.toUpperCase()
-        : insta360 && (insta360.stitchable || (asset.type === AssetType.Image && insta360.preview))
-          ? 'EQUIRECTANGULAR'
-          : null,
+      projectionType: exifTags.ProjectionType ? exifTags.ProjectionType.toUpperCase() : insta360Projection,
       bitsPerSample: this.getBitsPerSample(exifTags),
       colorspace: exifTags.ColorSpace === undefined ? null : String(exifTags.ColorSpace),
 
@@ -374,7 +376,8 @@ export class MetadataService extends BaseService {
     const isSidewards = exifTags.Orientation && this.isOrientationSidewards(exifTags.Orientation);
     const assetWidth = validate(isSidewards ? height : width);
     // stitched Insta360 files are 2:1; a .insv only reports its square lens stream
-    const assetHeight = validate(insta360?.stitchable && width ? width / 2 : isSidewards ? width : height);
+    const assetHeight =
+      insta360 === null ? asset.height : validate(insta360Stitched && width ? width / 2 : isSidewards ? width : height);
 
     const tasks = new Tasks();
 
@@ -583,24 +586,28 @@ export class MetadataService extends BaseService {
    * Its trailer also keeps the camera's local time: like `inferTimezoneFromDatestamps`, the pair gives the zone.
    */
   private withInsta360Zone(tags: ImmichTags, localTime?: string): ImmichTags {
-    const utc = firstDateTime(tags)?.dateTime;
-    const local = localTime ? DateTime.fromFormat(localTime, 'yyyyMMddHHmmss', { zone: 'UTC' }) : undefined;
-    if (tags.zoneSource !== 'defaultVideosToUTC' || !utc?.hasZone || !local?.isValid) {
+    if (tags.zoneSource !== 'defaultVideosToUTC' || !localTime) {
       return tags;
     }
-    const minutes = Math.round(local.diff(utc.toDateTime(), 'minutes').minutes / 15) * 15;
-    if (Math.abs(minutes) > 14 * 60) {
+    const utc = firstDateTime(tags)?.dateTime;
+    const local = DateTime.fromFormat(localTime, 'yyyyMMddHHmmss', { zone: 'UTC' });
+    if (!utc?.hasZone || !local.isValid) {
+      return tags;
+    }
+    const exact = local.diff(utc.toDateTime(), 'minutes').minutes;
+    const minutes = Math.round(exact / 15) * 15;
+    // a drifted camera clock lands between real offsets; keep the guess rather than invent a zone
+    if (Math.abs(exact - minutes) > 2 || minutes < -12 * 60 || minutes > 14 * 60) {
       return tags;
     }
     return { ...tags, zone: FixedOffsetZone.instance(minutes).name, zoneSource: 'Insta360 creation_time' };
   }
 
-  /** The same check video conversion and photo stitching make, so a metadata refresh agrees with them. */
+  /** The same check video conversion and photo stitching make, so a metadata refresh agrees with them; null if unreadable. */
   private probeInsta360(path: string) {
     return this.mediaRepository.probeInsta360(path).catch((error) => {
-      // an I/O failure says nothing about the file: keep the stitched default rather than store "flat"
       this.logger.warn(`Could not probe Insta360 file ${path}: ${error}`);
-      return { stitchable: true, preview: true, localTime: undefined };
+      return null;
     });
   }
 

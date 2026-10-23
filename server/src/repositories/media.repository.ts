@@ -671,8 +671,9 @@ export class MediaRepository {
   private async insta360LensStream(input: string) {
     const { streams } = await probe(input, []);
     const [stream, ...others] = streams.filter((stream) => stream.codec_type === 'video');
-    if (!stream?.width || others.length === 0) {
-      throw new Insta360UnsupportedError('expected one video stream per lens');
+    // the stitch is width x width/2
+    if (!stream?.width || stream.width % 2 !== 0 || others.length === 0) {
+      throw new Insta360UnsupportedError('expected one even-width video stream per lens');
     }
     return stream;
   }
@@ -682,18 +683,20 @@ export class MediaRepository {
     const file = await fs.open(input, 'r');
     try {
       const { size } = await file.stat();
-      const { buffer: tail } = await file.read(
-        Buffer.alloc(INSTA360_TAIL_LENGTH),
-        0,
-        INSTA360_TAIL_LENGTH,
-        Math.max(size - INSTA360_TAIL_LENGTH, 0),
-      );
-      const length = insta360TrailerLength(tail, size);
-      const { buffer, bytesRead } = await file.read(Buffer.alloc(length), 0, length, size - length);
-      // a short read would parse as "no records" and look unsupported; it is an I/O error worth a retry
-      if (bytesRead !== length) {
-        throw new Error(`short read of the Insta360 trailer (${bytesRead} of ${length} bytes)`);
+      // a short read would parse as "no trailer" or "no records" and look unsupported; it is an I/O error
+      const read = async (length: number, position: number) => {
+        const { buffer, bytesRead } = await file.read(Buffer.alloc(length), 0, length, position);
+        if (bytesRead !== length) {
+          throw new Error(`short read of the Insta360 trailer (${bytesRead} of ${length} bytes)`);
+        }
+        return buffer;
+      };
+      if (size < INSTA360_TAIL_LENGTH) {
+        throw new Insta360UnsupportedError('no Insta360 trailer');
       }
+      const tail = await read(INSTA360_TAIL_LENGTH, size - INSTA360_TAIL_LENGTH);
+      const length = insta360TrailerLength(tail, size);
+      const buffer = await read(length, size - length);
       return parseInsta360Trailer(buffer);
     } finally {
       await file.close();

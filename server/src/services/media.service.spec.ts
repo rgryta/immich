@@ -2123,10 +2123,8 @@ describe(MediaService.name, () => {
       await expect(sut.handleVideoConversion({ id: 'video-id' })).rejects.toThrow('ENOSPC');
 
       expect(mocks.media.transcode).not.toHaveBeenCalled();
-      // the raw original plays meanwhile, so it must not be shown as a panorama
-      expect(mocks.asset.upsertExif).toHaveBeenCalledWith(
-        expect.objectContaining({ exif: { assetId: asset.id, projectionType: null } }),
-      );
+      // a re-run must not flatten the stitched video it already has (metadata flattens a first run)
+      expect(mocks.asset.upsertExif).not.toHaveBeenCalled();
     });
 
     it('should transcode an Insta360 video unstitched when it cannot be stitched', async () => {
